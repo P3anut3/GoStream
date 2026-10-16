@@ -64,7 +64,7 @@ $jwtRng.Dispose()
 
 ```powershell
 go mod download
-go run .
+go run ./cmd/server
 ```
 
 从仓库根目录启动，以便读取 `.env`。服务监听 `127.0.0.1:8080`，按 Ctrl+C 停止。`OpenDB` 会检查数据库连接，但连接成功不代表表已存在。
@@ -120,7 +120,7 @@ token 缺失、格式不正确、签名校验失败或过期返回 401；数据�
 ## 测试与验证范围
 
 ```powershell
-go test -v .
+go test -v ./...
 ```
 
 当前自动测试覆盖：正确/错误密码、正确/错误 JWT 密钥、过期 token、无 token 时拦截后续处理、有效 token 时放行并传递用户 ID。测试不启动监听端口，不需要 `.env` 或 MySQL。
@@ -133,15 +133,17 @@ go test -v .
 
 | 文件 | 用途 |
 | --- | --- |
-| `main.go` | 加载配置、装配数据库和 handler、注册路由、启动 Hertz |
-| `handler.go` | 注册、登录和当前用户查询 |
-| `db.go` | 创建 MySQL 连接池并检查连接 |
-| `user.go` | 用户模型 |
-| `pwd.go` | bcrypt 哈希生成和校验 |
-| `jwt.go` | JWT 签发和验证 |
-| `auth.go` | Bearer token 鉴权中间件 |
-| `*_test.go` | 基础单元测试 |
+| `cmd/server/main.go` | 加载配置、装配数据库和 handler、注册路由、启动 Hertz |
+| `internal/user/handler.go` | 注册、登录和当前用户查询，以及用户接口的请求类型 |
+| `internal/user/model.go` | 用户模型 |
+| `internal/user/password.go` | bcrypt 哈希生成和校验 |
+| `internal/database/mysql.go` | 创建 MySQL 连接池并检查连接 |
+| `internal/auth/jwt.go` | JWT 签发和验证 |
+| `internal/auth/middleware.go` | Bearer token 鉴权中间件 |
+| `internal/auth/*_test.go`、`internal/user/*_test.go` | 基础单元测试 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
+
+目录按业务和职责分包，仍是一个进程。启动入口依赖 `database`、`auth`、`user`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。当前保留 handler 中的 SQL，暂不增加独立的 service/repository 层。开始实现视频功能时再创建 `internal/video`。
 
 ## 下一阶段
 

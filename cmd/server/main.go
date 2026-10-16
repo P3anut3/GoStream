@@ -4,6 +4,10 @@ import (
 	"log"
 	"os"
 
+	"gostream/internal/auth"
+	"gostream/internal/database"
+	"gostream/internal/user"
+
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/joho/godotenv"
 )
@@ -11,11 +15,6 @@ import (
 /*
 main.go：注册路由，指定请求交给谁处理
 */
-type CreateUserRequest struct { // 接收客户端请求 Password：明文密码
-	Username string `json:"username"`
-	Password string `json:"password"`
-}
-
 func main() {
 	if err := godotenv.Load(); err != nil {
 		log.Fatal("加载 .env 失败，请检查文件是否存在")
@@ -29,7 +28,7 @@ func main() {
 	if dsn == "" {
 		log.Fatal("请设置 GOSTREAM_DSN 环境变量")
 	}
-	db, err := OpenDB(dsn)
+	db, err := database.OpenDB(dsn)
 	if err != nil {
 		log.Fatalf("连接数据库失败:%v ", err)
 	}
@@ -39,11 +38,11 @@ func main() {
 	h := server.Default(
 		server.WithHostPorts("127.0.0.1:8080"),
 	)
-	userHandler := &UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
+	userHandler := &user.UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
 
 	h.POST("/users", userHandler.CreateUser)
 	h.POST("/login", userHandler.Login)
-	h.GET("/me", JWTAuth(userHandler.JWTSecret), userHandler.Me)
+	h.GET("/me", auth.JWTAuth(userHandler.JWTSecret), userHandler.Me)
 
 	h.Spin()
 }

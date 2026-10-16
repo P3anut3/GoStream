@@ -1,10 +1,12 @@
-package main
+package user
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"net/http"
+
+	"gostream/internal/auth"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/go-sql-driver/mysql"
@@ -16,6 +18,12 @@ handler.go：收到请求后，校验参数、生成哈希、写数据库、返�
 type UserHandler struct {
 	DB        *sql.DB
 	JWTSecret []byte
+}
+
+// CreateUserRequest 接收客户端提交的注册信息，Password 是明文密码。
+type CreateUserRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
 }
 type LoginRequest struct { // 登录请求结构体
 	Username string `json:"username"`
@@ -137,7 +145,7 @@ func (h *UserHandler) Login(ctx context.Context, c *app.RequestContext) {
 	}
 
 	//3、 生成 token
-	token, err := GenerateToken(user.ID, h.JWTSecret)
+	token, err := auth.GenerateToken(user.ID, h.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "生成登录凭证失败",
