@@ -1,0 +1,13 @@
+# Local configuration containing credentials
+.env
+.env.*
+!.env.example
+
+# Build outputs and logs
+*.exe
+*.test
+*.log
+
+# Editor settings
+.idea/
+.vscode/
