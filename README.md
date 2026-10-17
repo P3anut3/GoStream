@@ -1,6 +1,6 @@
 # GoStream
 
-一个用于学习 Go 后端开发的短视频后端项目，逐个模块实现和验证。当前阶段完成用户注册、登录、JWT 鉴权和当前用户查询，视频模块尚未实现。
+一个用于学习 Go 后端开发的短视频后端项目，逐个模块实现和验证。当前完成用户认证，以及视频元数据的发布、详情、分页列表和作者删除。真实文件上传尚未实现。
 
 ## 当前功能
 
@@ -10,6 +10,8 @@
 - HS256 JWT，包含用户 ID、签发时间和两小时有效期。
 - Bearer token 鉴权中间件。
 - 密码、JWT 和鉴权中间件的基础单元测试。
+- 视频元数据存储、公开查询、分页查询和仅作者可删除的权限控制。
+- 显式开启的 MySQL 删除权限集成测试。
 
 当前未引入 Redis、消息队列或微服务。
 
@@ -31,7 +33,7 @@ mysql -h 127.0.0.1 -P 13306 -u root -p
 SOURCE D:/code/Golang/GoStream/scripts/schema.sql;
 ```
 
-脚本创建 `gostream` 数据库和 `users` 表，不删除已有数据。`IF NOT EXISTS` 不会更新已有表的结构；它是初始建表脚本，不是数据库迁移系统。应用本身不会自动建表。
+脚本创建 `gostream` 数据库和 `users`、`videos` 表，不删除已有数据。`IF NOT EXISTS` 不会更新已有表的结构；它是初始建表脚本，不是数据库迁移系统。应用本身不会自动建表。视频作者外键关联 `users.id`，有视频记录的用户不能直接删除。
 
 ### 2. 配置本地环境
 
@@ -78,6 +80,10 @@ go run ./cmd/server
 | POST | `/users` | 无 | 201，用户 ID 和用户名 |
 | POST | `/login` | 用户名和密码 | 200，用户 ID、用户名和 token |
 | GET | `/me` | Bearer token | 200，当前用户 ID 和用户名 |
+| POST | `/videos` | Bearer token | 201，视频 ID、作者 ID 和标题 |
+| GET | `/videos/:id` | 无 | 200，视频元数据 |
+| GET | `/videos` | 无 | 200，分页参数及视频数组 |
+| DELETE | `/videos/:id` | Bearer token | 204，无响应体，仅作者可删除 |
 
 ### 注册
 
@@ -117,15 +123,44 @@ Postman 中选择 **Authorization → Bearer Token**，只粘贴 token，不添�
 
 token 缺失、格式不正确、签名校验失败或过期返回 401；数据库中的当前用户已不存在也返回 401；查询失败或请求内部身份信息异常返回 500。成功只返回 ID 和用户名，不返回密码或哈希。
 
+### 视频元数据
+
+发布使用 JSON：
+
+```json
+{"title":"示例视频","play_url":"https://example.com/demo.mp4","cover_url":"https://example.com/cover.jpg"}
+```
+
+作者 ID 从已验证的 token 获取。标题和地址去除首尾空白后不能为空，标题最多 100 个 Unicode 字符，两项地址分别最多 1024 个字符。当前只存储 URL，不验证资源是否可播放，也不上传文件。参数错误返回 400，无有效 token 返回 401，数据库写入失败返回 500。
+
+详情示例：`GET /videos/1`。ID 非法或为 0 返回 400，不存在返回 404，数据库错误返回 500。成功返回 `id`、`author_id`、`title`、`play_url`、`cover_url`、`created_at`。
+
+列表示例：`GET /videos?page=1&page_size=5`。默认页码 1、每页 10 条；页码范围 1～10000，每页范围 1～100，非法参数返回 400。偏移量为 `(page-1)*page_size`。响应包含 `page`、`page_size`、`videos`；没有记录时 `videos` 为 `[]`。当前 SQL 未显式指定排序，尚不能保证按新到旧排列及稳定分页顺序。
+
+删除示例：`DELETE /videos/1`。SQL 同时匹配视频 ID 和当前用户 ID。ID 非法返回 400，无有效 token 返回 401，没有匹配到属于自己的记录返回 404，删除成功返回 204 且无响应体，数据库错误返回 500。当前只删除元数据，不涉及文件清理。
+
 ## 测试与验证范围
 
 ```powershell
 go test -v ./...
 ```
 
-当前自动测试覆盖：正确/错误密码、正确/错误 JWT 密钥、过期 token、无 token 时拦截后续处理、有效 token 时放行并传递用户 ID。测试不启动监听端口，不需要 `.env` 或 MySQL。
+默认自动测试覆盖：正确/错误密码、正确/错误 JWT 密钥、过期 token、无 token 时拦截后续处理、有效 token 时放行并传递用户 ID。默认跳过数据库集成测试，不启动监听端口，不需要 `.env` 或 MySQL。
 
-注册、重复注册、登录和携带 token 查询 `/me` 已由开发者在本地通过 Postman 手动验证。当前尚无自动化数据库集成测试，也未穷尽 HTTP 参数和 token 的全部边界情况。
+注册、重复注册、登录、`/me` 及视频发布、详情、列表已通过本地 Postman 手动验证；未穷尽 HTTP 参数和 token 的全部边界情况。
+
+删除权限集成测试需要 `.env` 和已建表的 MySQL，在 PowerShell 中显式开启：
+
+```powershell
+$env:GOSTREAM_INTEGRATION_TEST = '1'
+try {
+    go test -v ./internal/video -run '^TestDeleteIntegration$' -count=1
+} finally {
+    Remove-Item Env:GOSTREAM_INTEGRATION_TEST -ErrorAction SilentlyContinue
+}
+```
+
+测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。9 个子场景覆盖缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除；已在本地运行通过。
 
 当前环境可能打印 Sonic 不支持该 Go 版本并回退到 `encoding/json` 的警告；已观察到现有测试可通过，不表示已完成依赖兼容性验证。
 
@@ -141,10 +176,12 @@ go test -v ./...
 | `internal/auth/jwt.go` | JWT 签发和验证 |
 | `internal/auth/middleware.go` | Bearer token 鉴权中间件 |
 | `internal/auth/*_test.go`、`internal/user/*_test.go` | 基础单元测试 |
+| `internal/video/handler.go`、`model.go` | 视频元数据接口和模型 |
+| `internal/video/delete_integration_test.go` | 连接 MySQL 的删除权限集成测试 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，仍是一个进程。启动入口依赖 `database`、`auth`、`user`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。当前保留 handler 中的 SQL，暂不增加独立的 service/repository 层。开始实现视频功能时再创建 `internal/video`。
+目录按业务和职责分包，仍是一个进程。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。当前保留 handler 中的 SQL，暂不增加独立的 service/repository 层。
 
 ## 下一阶段
 
-先理解和整理现有用户模块，再进入视频模块。当前没有实现 token 刷新、主动撤销、登录限流等功能，不将此学习版本视为完整的生产认证系统。
+下一阶段学习 multipart 文件接收，再逐步实现本地存储和访问。列表排序、URL 校验等边界仍待完善。当前没有实现 token 刷新、主动撤销、登录限流等功能，不将此学习版本视为完整的生产认证系统。

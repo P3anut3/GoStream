@@ -161,7 +161,7 @@ func (h *UserHandler) Login(ctx context.Context, c *app.RequestContext) {
 
 }
 
-// 验证
+// 读取信息
 func (h *UserHandler) Me(ctx context.Context, c *app.RequestContext) {
 	//1、去除中间件验证后的用户ID
 	value, exists := c.Get("userID")

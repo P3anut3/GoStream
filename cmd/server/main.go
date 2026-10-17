@@ -1,6 +1,7 @@
 package main
 
 import (
+	"gostream/internal/video"
 	"log"
 	"os"
 
@@ -39,10 +40,14 @@ func main() {
 		server.WithHostPorts("127.0.0.1:8080"),
 	)
 	userHandler := &user.UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
-
+	videoHandler := &video.Handler{DB: db}
 	h.POST("/users", userHandler.CreateUser)
 	h.POST("/login", userHandler.Login)
 	h.GET("/me", auth.JWTAuth(userHandler.JWTSecret), userHandler.Me)
 
+	h.POST("/videos", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Publish)
+	h.GET("/videos", videoHandler.List)
+	h.GET("/videos/:id", videoHandler.GetByID)
+	h.DELETE("/videos/:id", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Delete)
 	h.Spin()
 }
