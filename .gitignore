@@ -11,3 +11,9 @@
 # Editor settings
 .idea/
 .vscode/
+
+# Uploaded media stays local
+/uploads/
+
+# Generated static-file compression cache
+*.hertz.gz
