@@ -17,9 +17,10 @@ import (
 )
 
 type Handler struct { // 持有数据库连接池，后续提供处理方法
-	DB        *sql.DB
-	UploadDir string
-	CoverDir  string
+	DB             *sql.DB
+	UploadDir      string
+	CoverDir       string
+	CommentService *CommentService
 }
 
 type PublishRequest struct { // 接收客户端提交的发布信息

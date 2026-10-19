@@ -50,7 +50,7 @@ func TestDeleteIntegration(t *testing.T) {
 	h := server.New()
 	users := &user.UserHandler{DB: db, JWTSecret: secret}
 	uploadDir := t.TempDir()
-	videos := &Handler{DB: db, UploadDir: uploadDir, CoverDir: t.TempDir()}
+	videos := &Handler{DB: db, UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
 	h.POST("/users", users.CreateUser)
 	h.POST("/login", users.Login)
 	h.POST("/videos", auth.JWTAuth(secret), videos.Publish)

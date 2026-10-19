@@ -281,3 +281,19 @@ try {
 详情窗口提供每页 5 条的公开评论列表、上一页/下一页和刷新。登录后可提交 1～500 个 Unicode 字符的评论，成功后回到第一页；失败保留输入并提示先刷新确认，防止网络异常时重复发送。仅对当前评论作者显示删除按钮，确认后调用后端权限校验；删掉末页唯一评论时回到上一页。评论内容通过 textContent 输出，不作为 HTML 解析。切换视频、关闭详情或切换账号会使旧请求失效。
 
 `node scripts/web_comments_test.cjs` 使用模拟 DOM/API 验证分页、文本安全显示、鉴权交互、提交和删除、失败重试、Unicode 长度、旧请求隔离及登录失效时保留草稿。点赞和上传的模拟测试同时通过。真实浏览器中的布局、焦点和滚动显示仍需页面验收。
+
+### 发表评论的分层示例
+
+目前只重构发表评论这条链路，评论列表、删除评论及其他模块暂时沿用原有写法。文件仍处于 `internal/video` 包，不引入额外框架。
+
+| 文件 | 职责 |
+| --- | --- |
+| `comment.go` 的 `Handler.CreateComment` | 读取已验证身份、解析 URL 和 JSON，将业务结果映射成 HTTP 状态和响应 |
+| `comment_service.go` | 去除首尾空白、校验 1～500 个 Unicode 字符，调用存储接口，组装结果 |
+| `comment_repository.go` | SQL 插入、识别目标视频不存在、读取受影响行数及自增 ID |
+
+请求流向为 Handler → CommentService → CommentRepository → MySQL。Service 只依赖一个小的 Go interface，不依赖 Hertz 或数据库连接。`cmd/server/main.go` 依次创建 SQLCommentRepository、CommentService、Handler，并把前一个对象交给后一个对象；这是依赖传递，不是发起业务请求。Handler 暂时仍持有 DB，供尚未分层的其他处理函数使用。
+
+Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400、视频不存在映射为 404、存储异常映射为 500。原有请求、状态码、成功响应字段和安全错误提示保持不变。测试中的 Handler 也必须明确配置 CommentService。
+
+`go test -v ./internal/video -run '^TestCommentServiceCreateComment$'` 不启动 HTTP、不访问 MySQL，8 个子场景通过仓储替身验证非法内容不触发存储、内容规范化、中文及 emoji 边界、错误及 context 传递。现有真实 MySQL 的 86 个联调场景继续验证整条 HTTP → Service → Repository 链路。

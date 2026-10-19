@@ -7,8 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
-	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 )
@@ -44,53 +42,35 @@ func (h *Handler) CreateComment(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
-	req.Content = strings.TrimSpace(req.Content)
-	length := utf8.RuneCountInString(req.Content)
-	if length < 1 || length > 500 {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "评论内容必须为 1~500 个字符",
-		})
+	// 4. 把普通 Go 数据交给业务层；Handler 负责将结果映射成 HTTP 响应。
+	if h.CommentService == nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "评论服务未初始化"})
 		return
 	}
-	// 4、视频存在时，才插入评论
-	result, err := h.DB.ExecContext(ctx,
-		`INSERT INTO video_comments(video_id, user_id, content)
-		SELECT id,?,? FROM videos WHERE id = ?`,
-		userID, req.Content, videoID,
-	)
+	comment, err := h.CommentService.CreateComment(ctx, userID, videoID, req.Content)
+	if errors.Is(err, ErrInvalidCommentContent) {
+		c.JSON(http.StatusBadRequest, map[string]string{"error": ErrInvalidCommentContent.Error()})
+		return
+	}
+	if errors.Is(err, ErrCommentVideoNotFound) {
+		c.JSON(http.StatusNotFound, map[string]string{"error": ErrCommentVideoNotFound.Error()})
+		return
+	}
 	if err != nil {
-		log.Printf("保存评论失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "保存评论失败",
-		})
-		return
-	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取评论保存结果失败",
-		})
-		return
-	}
-	if affected == 0 {
-		c.JSON(http.StatusNotFound, map[string]string{
-			"error": "视频不存在",
-		})
-		return
-	}
-	commentID, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取评论 ID 失败",
-		})
+		log.Printf("发表评论失败: %v", err)
+		message := "保存评论失败"
+		var storageErr *commentStorageError
+		if errors.As(err, &storageErr) {
+			message = storageErr.message
+		}
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": message})
 		return
 	}
 	c.JSON(http.StatusCreated, map[string]interface{}{
-		"id":       commentID,
-		"video_id": videoID,
-		"user_id":  userID,
-		"content":  req.Content,
+		"id":       comment.ID,
+		"video_id": comment.VideoID,
+		"user_id":  comment.UserID,
+		"content":  comment.Content,
 	})
 
 }

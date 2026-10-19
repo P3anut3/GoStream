@@ -24,7 +24,7 @@ func TestCreateCommentValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := server.New()
-	handler := &Handler{DB: db}
+	handler := &Handler{DB: db, CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
 	h.POST("/videos/:id/comments", auth.JWTAuth(secret), handler.CreateComment)
 	for _, tc := range []struct {
 		name, id, token, body string

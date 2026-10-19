@@ -42,7 +42,14 @@ func main() {
 		server.WithMaxRequestBodySize(101*1024*1024), // 限制请求体大小上限
 	)
 	userHandler := &user.UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
-	videoHandler := &video.Handler{DB: db, UploadDir: "uploads/videos", CoverDir: "uploads/covers"}
+	commentRepository := &video.SQLCommentRepository{DB: db}
+	commentService := video.NewCommentService(commentRepository)
+	videoHandler := &video.Handler{
+		DB:             db,
+		UploadDir:      "uploads/videos",
+		CoverDir:       "uploads/covers",
+		CommentService: commentService,
+	}
 	h.POST("/users", userHandler.CreateUser)
 	h.POST("/login", userHandler.Login)
 	h.GET("/me", auth.JWTAuth(userHandler.JWTSecret), userHandler.Me)
