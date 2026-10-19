@@ -56,6 +56,11 @@ func TestDeleteIntegration(t *testing.T) {
 	h.POST("/videos", auth.JWTAuth(secret), videos.Publish)
 	h.POST("/uploads/videos", auth.JWTAuth(secret), videos.Upload)
 	h.POST("/uploads/covers", auth.JWTAuth(secret), videos.UploadCover)
+	h.PUT("/videos/:id/like", auth.JWTAuth(secret), videos.Like)
+	h.DELETE("/videos/:id/like", auth.JWTAuth(secret), videos.UnLike)
+	h.POST("/videos/:id/comments", auth.JWTAuth(secret), videos.CreateComment)
+	h.GET("/videos/:id/comments", videos.ListComments)
+	h.DELETE("/comments/:id", auth.JWTAuth(secret), videos.DeleteComment)
 	h.GET("/videos/:id", videos.GetByID)
 	h.GET("/videos", videos.List)
 	h.GET("/me/videos", auth.JWTAuth(secret), videos.ListMine)
@@ -94,6 +99,12 @@ func TestDeleteIntegration(t *testing.T) {
 			}
 			if _, err := db.Exec("DELETE FROM uploads WHERE user_id IN (SELECT id FROM users WHERE username = ?)", name); err != nil {
 				t.Error("failed to clean fixture upload records")
+			}
+			if _, err := db.Exec("DELETE FROM video_likes WHERE user_id IN (SELECT id FROM users WHERE username = ?)", name); err != nil {
+				t.Error("failed to clean fixture likes")
+			}
+			if _, err := db.Exec("DELETE FROM video_comments WHERE user_id IN (SELECT id FROM users WHERE username = ?)", name); err != nil {
+				t.Error("failed to clean fixture comments")
 			}
 			if _, err := db.Exec("DELETE FROM users WHERE username = ?", name); err != nil {
 				t.Error("failed to clean fixture account")
@@ -342,6 +353,7 @@ func TestDeleteIntegration(t *testing.T) {
 		t.Fatal("publication did not return expected ownership")
 	}
 	path := "/videos/" + strconv.FormatUint(published.ID, 10)
+	testCreateComments(t, db, request, published.ID, ownerID, otherID, ownerToken, otherToken)
 	// Each account owns a separate uploaded video, so filtering is observable.
 	otherResp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/videos",
 		&ut.Body{Body: bytes.NewReader(multipartBody.Bytes()), Len: multipartBody.Len()},
@@ -359,6 +371,12 @@ func TestDeleteIntegration(t *testing.T) {
 	if status != 201 {
 		t.Fatalf("other publication expected 201, got %d", status)
 	}
+	var commentsOtherVideoID uint64
+	if err := db.QueryRow("SELECT id FROM videos WHERE author_id = ? AND title = ?", otherID, prefix+"_other").Scan(&commentsOtherVideoID); err != nil {
+		t.Fatal(err)
+	}
+	testListComments(t, db, request, published.ID, commentsOtherVideoID, otherToken)
+	testDeleteComments(t, db, request, published.ID, commentsOtherVideoID, ownerToken, otherToken)
 	for _, tc := range []struct {
 		name, token string
 		uid         uint64
@@ -409,6 +427,84 @@ func TestDeleteIntegration(t *testing.T) {
 			t.Error("public library must include both users' new videos")
 		}
 	})
+	for _, tc := range []struct {
+		name, target, token string
+		want                int
+	}{
+		{"like_first_time", path + "/like", ownerToken, 204},
+		{"like_repeat", path + "/like", ownerToken, 204},
+		{"like_other_user", path + "/like", otherToken, 204},
+		{"like_without_token", path + "/like", "", 401},
+		{"like_invalid_token", path + "/like", "invalid", 401},
+		{"like_invalid_id", "/videos/abc/like", ownerToken, 400},
+		{"like_zero_id", "/videos/0/like", ownerToken, 400},
+		{"like_negative_id", "/videos/-1/like", ownerToken, 400},
+		{"like_missing_video", "/videos/18446744073709551615/like", ownerToken, 404},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := request(http.MethodPut, tc.target, tc.token, nil)
+			if status != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, status)
+			}
+			if tc.want == 204 && len(body) != 0 {
+				t.Error("204 must have no body")
+			}
+		})
+	}
+	t.Run("like_unique_per_user_and_video", func(t *testing.T) {
+		for _, uid := range []uint64{ownerID, otherID} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM video_likes WHERE user_id = ? AND video_id = ?", uid, published.ID).Scan(&count); err != nil || count != 1 {
+				t.Error("each user must have exactly one like for the video")
+			}
+		}
+	})
+	// The owner likes a second video: cancelling the first must not remove it.
+	var otherVideoID uint64
+	if err := db.QueryRow("SELECT id FROM videos WHERE author_id = ? AND title = ?", otherID, prefix+"_other").Scan(&otherVideoID); err != nil {
+		t.Fatal("cannot find second video fixture")
+	}
+	if status, _ := request(http.MethodPut, "/videos/"+strconv.FormatUint(otherVideoID, 10)+"/like", ownerToken, nil); status != 204 {
+		t.Fatal("cannot prepare like on second video")
+	}
+	for _, tc := range []struct {
+		name, target, token string
+		want                int
+	}{
+		{"unlike_once", path + "/like", ownerToken, 204},
+		{"unlike_repeat", path + "/like", ownerToken, 204},
+		{"unlike_without_token", path + "/like", "", 401},
+		{"unlike_invalid_token", path + "/like", "invalid", 401},
+		{"unlike_invalid_id", "/videos/abc/like", ownerToken, 400},
+		{"unlike_zero_id", "/videos/0/like", ownerToken, 400},
+		{"unlike_negative_id", "/videos/-1/like", ownerToken, 400},
+		{"unlike_missing_video", "/videos/18446744073709551615/like", ownerToken, 204},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := request(http.MethodDelete, tc.target, tc.token, nil)
+			if status != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, status)
+			}
+			if tc.want == 204 && len(body) != 0 {
+				t.Error("204 must have no body")
+			}
+		})
+	}
+	t.Run("unlike_only_removes_current_users_target", func(t *testing.T) {
+		for _, tc := range []struct {
+			uid, vid uint64
+			want     int
+		}{
+			{ownerID, published.ID, 0},
+			{otherID, published.ID, 1},
+			{ownerID, otherVideoID, 1},
+		} {
+			var count int
+			if err := db.QueryRow("SELECT COUNT(*) FROM video_likes WHERE user_id = ? AND video_id = ?", tc.uid, tc.vid).Scan(&count); err != nil || count != tc.want {
+				t.Errorf("like count for user %d/video %d: expected %d, got %d (error %v)", tc.uid, tc.vid, tc.want, count, err)
+			}
+		}
+	})
 	cases := []struct {
 		name, method, path, token string
 		want                      int
@@ -434,4 +530,16 @@ func TestDeleteIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("video_deletion_cascades_likes", func(t *testing.T) {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM video_likes WHERE video_id = ?", published.ID).Scan(&count); err != nil || count != 0 {
+			t.Error("deleting the video must remove its likes")
+		}
+	})
+	t.Run("video_deletion_cascades_comments", func(t *testing.T) {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM video_comments WHERE video_id = ?", published.ID).Scan(&count); err != nil || count != 0 {
+			t.Error("deleting the video must remove its comments")
+		}
+	})
 }

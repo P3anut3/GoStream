@@ -2,13 +2,13 @@
 
 // 统一请求入口，token 仅保存在当前页面内存，不写入 localStorage。
 const $ = (id) => document.getElementById(id);
-const state = { token: "", user: null, scope: "all", page: 1, size: 6, videos: [], mode: "login", source: "file", file: null, uploaded: null, coverFile: null, uploadedCover: null, coverPreview: "", detail: null, preview: "", busy: false, listSequence: 0, detailSequence: 0 };
+const state = { token: "", user: null, scope: "all", page: 1, size: 6, videos: [], mode: "login", source: "file", file: null, uploaded: null, coverFile: null, uploadedCover: null, coverPreview: "", detail: null, preview: "", busy: false, listSequence: 0, detailSequence: 0, likeStatus: null, likeLoading: false, likeBusy: false, likeSequence: 0, commentPage: 1, commentSize: 5, comments: [], commentLoading: false, commentBusy: false, commentHasNext: false, commentError: "", commentSequence: 0, commentMutation: 0, commentDeleteTarget: null };
 let toastTimer;
 let pendingMine = false;
 function notify(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4500); }
 function mediaURL(value) { if (!value) return ""; try { const u = new URL(value, location.origin); return ["http:", "https:"].includes(u.protocol) ? u.href : ""; } catch { return ""; } }
 function formatDate(value) { const d = new Date(value); return Number.isNaN(d.valueOf()) ? "时间未知" : d.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }); }
-function session(token = "", user = null) { const changed = state.token !== token; if (changed) { state.uploaded = null; state.uploadedCover = null; } state.token = token; state.user = user; $("account-name").textContent = user ? user.username : "访客模式"; $("auth-button").textContent = user ? "账户信息" : "登录 / 注册"; $("logout-button").hidden = !user; $("delete-button").hidden = !user || !state.detail || String(state.detail.author_id) !== String(user.id); if (changed && state.scope === "mine") { if (!token) state.scope = "all"; state.page = 1; updateScope(); loadVideos(); } }
+function session(token = "", user = null) { const changed = state.token !== token; if (changed) { state.uploaded = null; state.uploadedCover = null; } state.token = token; state.user = user; $("account-name").textContent = user ? user.username : "访客模式"; $("auth-button").textContent = user ? "账户信息" : "登录 / 注册"; $("logout-button").hidden = !user; $("delete-button").hidden = !user || !state.detail || String(state.detail.author_id) !== String(user.id); if (changed) { syncCommentSession(); resetLikeState(); if (state.detail && $("detail-dialog").open) loadLikeStatus(); } if (changed && state.scope === "mine") { if (!token) state.scope = "all"; state.page = 1; updateScope(); loadVideos(); } }
 async function api(path, { method = "GET", body, auth = false, form = false } = {}) {
   if (auth && !state.token) throw new Error("请先登录后再操作");
   const requestToken = state.token;
@@ -80,13 +80,194 @@ async function loadVideos() {
 $("refresh-button").onclick = loadVideos; $("prev-page").onclick = () => { if (state.page > 1) { state.page--; loadVideos(); } }; $("next-page").onclick = () => { state.page++; loadVideos(); }; $("page-size").onchange = () => { state.size = Number($("page-size").value); state.page = 1; loadVideos(); }; $("lookup-form").onsubmit = (e) => { e.preventDefault(); showDetail($("lookup-id").value); };
 async function showDetail(id) {
   const sequence = ++state.detailSequence;
-  try { const video = await api("/videos/" + encodeURIComponent(id)); if (sequence !== state.detailSequence) return; state.detail = video; $("detail-title").textContent = video.title; $("detail-label").textContent = "VIDEO / " + video.id; $("detail-meta").textContent = "创作者 " + video.author_id + " · " + formatDate(video.created_at); const url = mediaURL(video.play_url); $("playback-message").textContent = url ? "" : "视频地址格式不受支持"; $("detail-player").removeAttribute("src"); if (url) $("detail-player").src = url; $("detail-player").poster = mediaURL(video.cover_url) || "/cover.svg"; $("open-media").hidden = !url; if (url) $("open-media").href = url; $("delete-button").hidden = !state.user || String(video.author_id) !== String(state.user.id); if (!$("detail-dialog").open) $("detail-dialog").showModal(); }
+  state.detail = null; resetLikeState(); resetComments();
+  try { const video = await api("/videos/" + encodeURIComponent(id)); if (sequence !== state.detailSequence) return; state.detail = video; $("detail-title").textContent = video.title; $("detail-label").textContent = "VIDEO / " + video.id; $("detail-meta").textContent = "创作者 " + video.author_id + " · " + formatDate(video.created_at); const url = mediaURL(video.play_url); $("playback-message").textContent = url ? "" : "视频地址格式不受支持"; $("detail-player").removeAttribute("src"); if (url) $("detail-player").src = url; $("detail-player").poster = mediaURL(video.cover_url) || "/cover.svg"; $("open-media").hidden = !url; if (url) $("open-media").href = url; $("delete-button").hidden = !state.user || String(video.author_id) !== String(state.user.id); if (!$("detail-dialog").open) $("detail-dialog").showModal(); await Promise.all([loadLikeStatus(), loadComments()]); }
   catch (error) { notify(error.message); }
 }
+// 点赞数量来自后端查询；只在请求成功后刷新，不在前端猜测数量。
+function renderLikes() {
+  const button = $("like-button");
+  const status = state.likeStatus;
+  button.classList.toggle("liked", Boolean(status?.liked));
+  button.setAttribute("aria-pressed", String(Boolean(status?.liked)));
+  button.disabled = !state.detail || state.likeBusy || state.likeLoading;
+  $("refresh-likes").hidden = !state.token;
+  $("refresh-likes").disabled = button.disabled;
+  if (!state.token) {
+    button.textContent = "♡ 登录后点赞"; $("like-count").textContent = "登录后查看点赞数量";
+  } else if (state.likeBusy) {
+    button.textContent = "正在处理……";
+  } else if (state.likeLoading) {
+    button.textContent = "正在查询……"; $("like-count").textContent = "正在读取点赞数量";
+  } else if (!status) {
+    button.textContent = "重试查询"; $("like-count").textContent = "点赞状态暂不可用";
+  } else {
+    button.textContent = status.liked ? "♥ 已点赞 · 点击取消" : "♡ 点赞";
+    $("like-count").textContent = status.like_count + " 人点赞";
+  }
+}
+function resetLikeState() {
+  ++state.likeSequence; state.likeStatus = null; state.likeBusy = false; state.likeLoading = false;
+  $("like-message").textContent = ""; renderLikes();
+}
+function sameLikeTarget(id, token, sequence) {
+  return state.detail && String(state.detail.id) === String(id) && state.token === token && state.likeSequence === sequence && $("detail-dialog").open;
+}
+async function loadLikeStatus() {
+  if (!state.detail || !state.token) { renderLikes(); return; }
+  const id = state.detail.id, token = state.token, sequence = ++state.likeSequence;
+  state.likeLoading = true; $("like-message").textContent = ""; renderLikes();
+  try {
+    const status = await api("/videos/" + encodeURIComponent(id) + "/like", { auth: true });
+    if (!sameLikeTarget(id, token, sequence)) return;
+    if (!Number.isSafeInteger(status?.like_count) || status.like_count < 0 || typeof status.liked !== "boolean") throw new Error("点赞状态响应格式异常");
+    state.likeStatus = status;
+  } catch (error) {
+    if (!sameLikeTarget(id, token, sequence)) return;
+    state.likeStatus = null; $("like-message").textContent = error.message + "，可点击重试查询。";
+  } finally {
+    if (sameLikeTarget(id, token, sequence)) { state.likeLoading = false; renderLikes(); }
+  }
+}
+$("refresh-likes").onclick = () => { if (!state.likeBusy && !state.likeLoading) return loadLikeStatus(); };
+$("like-button").onclick = async () => {
+  if (!state.detail) return;
+  if (!state.token) { openAuth(); notify("登录后即可点赞"); return; }
+  if (state.likeBusy || state.likeLoading) return;
+  if (!state.likeStatus) { await loadLikeStatus(); return; }
+  const id = state.detail.id, token = state.token, liked = state.likeStatus.liked, sequence = ++state.likeSequence;
+  state.likeBusy = true; $("like-message").textContent = ""; renderLikes();
+  try {
+    await api("/videos/" + encodeURIComponent(id) + "/like", { method: liked ? "DELETE" : "PUT", auth: true });
+    if (!sameLikeTarget(id, token, sequence)) return;
+    state.likeBusy = false; await loadLikeStatus();
+  } catch (error) {
+    if (!sameLikeTarget(id, token, sequence)) return;
+    state.likeStatus = null; $("like-message").textContent = error.message + "，请重新查询点赞状态后再操作。";
+  } finally {
+    if (sameLikeTarget(id, token, sequence)) { state.likeBusy = false; renderLikes(); }
+  }
+};
 $("detail-player").onerror = () => { $("playback-message").textContent = "视频暂时无法播放。地址可能不可用，或浏览器不支持该视频编码。"; };
-$("detail-dialog").addEventListener("close", () => { $("detail-player").pause(); $("detail-player").removeAttribute("src"); $("detail-player").load(); });
+$("detail-dialog").addEventListener("close", () => { ++state.detailSequence; state.detail = null; resetLikeState(); resetComments(); $("detail-player").pause(); $("detail-player").removeAttribute("src"); $("detail-player").load(); });
 $("delete-button").onclick = () => { $("delete-error").textContent = ""; $("confirm-dialog").showModal(); };
 $("confirm-delete").onclick = async () => { if (!state.detail) return; $("confirm-delete").disabled = true; try { await api("/videos/" + state.detail.id, { method: "DELETE", auth: true }); $("confirm-dialog").close(); $("detail-dialog").close(); state.detail = null; if (state.videos.length === 1 && state.page > 1) state.page--; await loadVideos(); notify("视频记录已删除，已上传文件仍保留"); } catch (error) { $("delete-error").textContent = error.message; } finally { $("confirm-delete").disabled = false; } };
+
+// 评论列表公开读取，写入和删除仍由后端 JWT 与作者条件控制。
+function commentRow(comment) {
+  const row = document.createElement("article"); row.className = "comment-item";
+  const meta = document.createElement("div"); meta.className = "comment-meta";
+  const author = document.createElement("strong");
+  author.textContent = state.user && String(state.user.id) === String(comment.user_id) ? state.user.username + "（我）" : "用户 " + comment.user_id;
+  const date = document.createElement("time"); date.textContent = formatDate(comment.created_at);
+  meta.append(author, date);
+  if (state.token && state.user && String(state.user.id) === String(comment.user_id)) {
+    const button = document.createElement("button"); button.type = "button"; button.className = "text-button comment-delete"; button.textContent = "删除";
+    button.disabled = state.commentBusy || state.commentLoading;
+    button.onclick = () => {
+      if (!state.detail || state.commentBusy || state.commentLoading) return;
+      state.commentDeleteTarget = { id: comment.id, videoID: state.detail.id, token: state.token };
+      $("comment-delete-error").textContent = ""; $("comment-delete-dialog").showModal();
+    };
+    meta.append(button);
+  }
+  const content = document.createElement("p"); content.className = "comment-text"; content.textContent = comment.content;
+  row.append(meta, content); return row;
+}
+function renderComments() {
+  const locked = !state.detail || state.commentBusy || state.commentLoading;
+  $("comments-list").replaceChildren(...state.comments.map(commentRow));
+  $("comments-count").textContent = state.commentError ? "暂不可用" : "本页 " + state.comments.length + " 条";
+  $("comments-page").textContent = "第 " + state.commentPage + " 页";
+  $("comments-prev").disabled = locked || state.commentPage <= 1;
+  $("comments-next").disabled = locked || !state.commentHasNext;
+  $("refresh-comments").disabled = locked;
+  $("comment-content").disabled = !state.detail || state.commentBusy || !state.token;
+  $("comment-submit").disabled = locked;
+  $("comment-submit").textContent = state.commentBusy ? "正在处理……" : (state.token ? "发表评论" : "登录后发表评论");
+  $("confirm-comment-delete").disabled = state.commentBusy;
+  $("comments-list-message").textContent = state.commentLoading ? "正在加载评论……" : state.commentError || (state.comments.length ? "" : (state.commentPage === 1 ? "还没有评论，来发表第一条吧。" : "这一页暂无评论，可返回上一页。"));
+  $("comment-counter").textContent = [...$("comment-content").value].length + " / 500 字符";
+}
+function closeCommentConfirmation() {
+  state.commentDeleteTarget = null;
+  if ($("comment-delete-dialog").open) $("comment-delete-dialog").close();
+}
+function resetComments() {
+  ++state.commentSequence; ++state.commentMutation;
+  state.commentPage = 1; state.comments = []; state.commentLoading = false; state.commentBusy = false; state.commentHasNext = false; state.commentError = "";
+  $("comment-content").value = ""; $("comment-message").textContent = "";
+  closeCommentConfirmation(); renderComments();
+}
+function syncCommentSession() {
+  ++state.commentSequence; ++state.commentMutation;
+  state.commentLoading = false; state.commentBusy = false;
+  closeCommentConfirmation(); renderComments();
+  if (state.detail && $("detail-dialog").open) loadComments();
+}
+function sameCommentTarget(id, sequence) {
+  return state.detail && String(state.detail.id) === String(id) && state.commentSequence === sequence && $("detail-dialog").open;
+}
+function sameCommentMutation(id, token, mutation) {
+  return state.detail && String(state.detail.id) === String(id) && state.token === token && state.commentMutation === mutation && $("detail-dialog").open;
+}
+async function loadComments() {
+  if (!state.detail) return;
+  const id = state.detail.id, page = state.commentPage, sequence = ++state.commentSequence;
+  state.commentLoading = true; state.commentError = ""; state.comments = []; renderComments();
+  try {
+    const data = await api("/videos/" + encodeURIComponent(id) + "/comments?page=" + page + "&page_size=" + state.commentSize);
+    if (!sameCommentTarget(id, sequence)) return;
+    if (!Array.isArray(data?.comments) || String(data.video_id) !== String(id) || data.page !== page || data.page_size !== state.commentSize) throw new Error("评论列表响应格式异常");
+    state.comments = data.comments;
+    state.commentHasNext = data.comments.length === state.commentSize && page < 10000;
+  } catch (error) {
+    if (!sameCommentTarget(id, sequence)) return;
+    state.commentError = error.message + "，可点击刷新评论重试。"; state.commentHasNext = false;
+  } finally {
+    if (sameCommentTarget(id, sequence)) { state.commentLoading = false; renderComments(); }
+  }
+}
+$("comment-content").oninput = () => { $("comment-counter").textContent = [...$("comment-content").value].length + " / 500 字符"; };
+$("refresh-comments").onclick = () => { if (!state.commentBusy && !state.commentLoading) return loadComments(); };
+$("comments-prev").onclick = () => { if (!state.commentBusy && !state.commentLoading && state.commentPage > 1) { --state.commentPage; return loadComments(); } };
+$("comments-next").onclick = () => { if (!state.commentBusy && !state.commentLoading && state.commentHasNext) { ++state.commentPage; return loadComments(); } };
+$("comment-form").onsubmit = async (event) => {
+  event.preventDefault(); if (!state.detail || state.commentBusy || state.commentLoading) return;
+  if (!state.token) { openAuth(); return; }
+  const draft = $("comment-content").value, content = draft.trim();
+  if (!content || [...content].length > 500) { $("comment-message").textContent = "评论内容必须为 1～500 个字符"; return; }
+  const id = state.detail.id, token = state.token, mutation = ++state.commentMutation;
+  state.commentBusy = true; $("comment-message").textContent = ""; renderComments();
+  try {
+    await api("/videos/" + encodeURIComponent(id) + "/comments", { method: "POST", body: { content }, auth: true });
+    if (!sameCommentMutation(id, token, mutation)) return;
+    if ($("comment-content").value === draft) $("comment-content").value = "";
+    state.commentPage = 1; await loadComments(); notify("评论已发表");
+  } catch (error) {
+    if (sameCommentMutation(id, token, mutation)) $("comment-message").textContent = error.message + "。输入已保留，可先刷新列表确认是否已发送，避免重复提交。";
+  } finally {
+    if (sameCommentMutation(id, token, mutation)) { state.commentBusy = false; renderComments(); }
+  }
+};
+$("confirm-comment-delete").onclick = async () => {
+  const target = state.commentDeleteTarget;
+  if (!target || state.commentBusy || !state.detail || String(target.videoID) !== String(state.detail.id) || target.token !== state.token) return;
+  const id = target.videoID, token = state.token, mutation = ++state.commentMutation;
+  state.commentBusy = true; $("comment-delete-error").textContent = ""; renderComments();
+  try {
+    await api("/comments/" + encodeURIComponent(target.id), { method: "DELETE", auth: true });
+    if (!sameCommentMutation(id, token, mutation)) return;
+    closeCommentConfirmation();
+    if (state.comments.length === 1 && state.commentPage > 1) --state.commentPage;
+    await loadComments(); notify("评论已删除");
+  } catch (error) {
+    if (sameCommentMutation(id, token, mutation)) $("comment-delete-error").textContent = error.message;
+  } finally {
+    if (sameCommentMutation(id, token, mutation)) { state.commentBusy = false; renderComments(); }
+  }
+};
+$("comment-delete-dialog").addEventListener("close", () => { state.commentDeleteTarget = null; });
 
 // 上传和发布分两步。元数据发布失败时，保留上传结果供重试。
 function openPublish() { if (!state.token) { openAuth(); notify("登录后即可发布视频"); return; } $("publish-message").textContent = ""; if (!$("publish-dialog").open) $("publish-dialog").showModal(); }

@@ -10,3 +10,10 @@ type Video struct {
 	CoverURL  string    `json:"cover_url"`
 	CreatedAt time.Time `json:"created_at"`
 }
+type Comment struct {
+	ID        uint64    `json:"id"`
+	VideoID   uint64    `json:"video_id"`
+	UserID    uint64    `json:"user_id"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
+}

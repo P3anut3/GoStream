@@ -70,5 +70,12 @@ func main() {
 		PathRewrite:        app.NewPathSlashesStripper(2),
 		GenerateIndexPages: false,
 	})
+	h.PUT("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Like)               // 点赞
+	h.GET("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.GetLikeStatus)      // 查看视频点赞数
+	h.DELETE("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.UnLike)          // 取消点赞
+	h.POST("/videos/:id/comments", auth.JWTAuth(userHandler.JWTSecret), videoHandler.CreateComment) // 添加评论
+	h.GET("/videos/:id/comments", videoHandler.ListComments)
+	h.DELETE("/comments/:id", auth.JWTAuth(userHandler.JWTSecret), videoHandler.DeleteComment)
+
 	h.Spin()
 }
