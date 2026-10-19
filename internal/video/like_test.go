@@ -2,6 +2,7 @@ package video
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -21,7 +22,7 @@ func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := server.New()
-	handler := &Handler{DB: db}
+	handler := &Handler{DB: db, LikeService: NewLikeService(&SQLLikeRepository{DB: db})}
 	h.PUT("/videos/:id/like", auth.JWTAuth(secret), handler.Like)
 	h.GET("/videos/:id/like", auth.JWTAuth(secret), handler.GetLikeStatus)
 	h.DELETE("/videos/:id/like", auth.JWTAuth(secret), handler.UnLike)
@@ -45,6 +46,21 @@ func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 					resp := ut.PerformRequest(h.Engine, method, "/videos/"+tc.id+"/like", nil, headers...).Result()
 					if resp.StatusCode() != tc.want {
 						t.Errorf("expected %d, got %d", tc.want, resp.StatusCode())
+					}
+					if tc.name == "database_failure" {
+						var failure struct {
+							Error string `json:"error"`
+						}
+						wantMessage := "点赞失败"
+						if method == http.MethodDelete {
+							wantMessage = "取消点赞失败"
+						}
+						if method == http.MethodGet {
+							wantMessage = "查询点赞状态失败"
+						}
+						if err := json.Unmarshal(resp.Body(), &failure); err != nil || failure.Error != wantMessage {
+							t.Fatal("valid request must reach the database rather than an uninitialized service")
+						}
 					}
 				})
 			}

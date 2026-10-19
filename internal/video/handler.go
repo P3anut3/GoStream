@@ -21,6 +21,7 @@ type Handler struct { // 持有数据库连接池，后续提供处理方法
 	UploadDir      string
 	CoverDir       string
 	CommentService *CommentService
+	LikeService    *LikeService
 }
 
 type PublishRequest struct { // 接收客户端提交的发布信息
@@ -302,13 +303,27 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
+	// tx表示本次事务。后面的数据库操作必须通过它执行，才能属于同一个事务。不会只创建了视频记录，却没更新上传状态；也不会只更新上传状态，却没创建视频记录。
+	tx, err := h.DB.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("开启发布事务失败: %v", err)
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "发布视频失败",
+		})
+		return
+	}
+	defer tx.Rollback()
+
 	// 验证上传用户是否是当前用户
-	var uploadID uint64
-	err := h.DB.QueryRowContext(
+	var videoUploadID, coverUploadID uint64
+	var videoStatus, coverStatus string
+	err = tx.QueryRowContext(
 		ctx,
-		`SELECT id FROM uploads
-          WHERE saved_name = ? AND user_id = ? AND file_type = ?`,
-		savedName, authorID, "video").Scan(&uploadID)
+		`SELECT id, status FROM uploads
+	 WHERE saved_name = ? AND user_id = ? AND file_type = ?
+	 FOR UPDATE`,
+		savedName, authorID, "video",
+	).Scan(&videoUploadID, &videoStatus)
 	// 查不到属于自己的上传记录”应返回 403
 	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusForbidden, map[string]string{
@@ -316,11 +331,16 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
-
 	if err != nil {
 		log.Printf("查询上传文件归属失败: %v", err)
 		c.JSON(http.StatusInternalServerError, map[string]string{
 			"error": "检查上传文件归属失败",
+		})
+		return
+	}
+	if videoStatus != "pending" && videoStatus != "published" {
+		c.JSON(http.StatusConflict, map[string]string{
+			"error": "视频文件正在清理或不可使用，请重新上传",
 		})
 		return
 	}
@@ -334,10 +354,12 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 			})
 			return
 		}
-		err = h.DB.QueryRowContext(ctx,
-			`SELECT id FROM uploads WHERE saved_name = ? AND user_id = ? AND file_type = ?`,
+		err = tx.QueryRowContext(ctx,
+			`SELECT id, status FROM uploads
+	 WHERE saved_name = ? AND user_id = ? AND file_type = ?
+	 FOR UPDATE`,
 			coverName, authorID, "cover",
-		).Scan(&uploadID)
+		).Scan(&coverUploadID, &coverStatus)
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusForbidden, map[string]string{
 				"error": "封面不存在、不属于当前用户或文件类型不正确",
@@ -351,10 +373,16 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 			})
 			return
 		}
+		if coverStatus != "pending" && coverStatus != "published" {
+			c.JSON(http.StatusConflict, map[string]string{
+				"error": "封面文件正在清理或不可使用，请重新上传",
+			})
+			return
+		}
 	}
 
 	// 4、保存视频元数据
-	result, err := h.DB.ExecContext(
+	result, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO videos (author_id, title,play_url, cover_url) VALUES (?, ?, ?, ?)`, authorID, req.Title, req.PlayURL, req.CoverURL)
 	if err != nil {
@@ -372,6 +400,39 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
+	_, err = tx.ExecContext(ctx,
+		`UPDATE uploads SET status = 'published' WHERE id = ?`,
+		videoUploadID,
+	)
+	if err != nil {
+		log.Printf("更新视频上传状态失败: %v", err)
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "发布视频失败",
+		})
+		return
+	}
+
+	if coverUploadID != 0 {
+		_, err = tx.ExecContext(ctx,
+			`UPDATE uploads SET status = 'published' WHERE id = ?`,
+			coverUploadID,
+		)
+		if err != nil {
+			log.Printf("更新封面上传状态失败: %v", err)
+			c.JSON(http.StatusInternalServerError, map[string]string{
+				"error": "发布视频失败",
+			})
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("提交发布事务失败: %v", err)
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "发布视频失败",
+		})
+		return
+	}
+
 	c.JSON(http.StatusCreated, map[string]interface{}{
 		"id":        id,
 		"author_id": authorID,

@@ -29,9 +29,11 @@ CREATE TABLE IF NOT EXISTS uploads (
     saved_name VARCHAR(64) NOT NULL,
     file_type VARCHAR(16) NOT NULL DEFAULT 'video',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(16) NOT NULL DEFAULT 'pending',
     PRIMARY KEY (id),
     UNIQUE KEY uk_uploads_saved_name (saved_name),
     KEY idx_uploads_user_id (user_id),
+    KEY idx_uploads_status_created_at (status, created_at),
     CONSTRAINT fk_uploads_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
 

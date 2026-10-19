@@ -18,6 +18,42 @@
 
 当前未引入 Redis、消息队列或微服务。
 
+## 手动清理过期上传
+
+已有数据库先执行一次 `scripts/migrations/004_upload_status.sql`；新数据库使用最新 `scripts/schema.sql`。发布时通过事务锁定视频及可选封面的上传记录，创建视频并将上传状态更新为 `published`。清理只领取已过期、未被视频引用的 `pending` 记录，将其标记为 `deleting` 后删除文件，再删除上传记录。失败保留 `deleting` 以便下次重试。
+
+在项目根目录执行，默认读取 `.env`，只预览，不改变数据库状态或删除文件：
+
+```powershell
+go run ./cmd/cleanup-uploads
+go run ./cmd/cleanup-uploads --limit=20
+```
+
+明确传入 `--execute` 才会真正处理一轮任务：
+
+```powershell
+go run ./cmd/cleanup-uploads --execute --limit=100 --timeout=30s
+```
+
+保留期限固定为 24 小时，使用与 HTTP 服务相同的 `uploads/videos` 和 `uploads/covers` 目录。`limit` 范围为 1～1000，分别限制重试任务和新增过期候选，一轮最多处理 `2 × limit` 条。优先重试 `deleting`，再处理过期 `pending`。预览不取得清理权，实际执行时仍重新锁定记录、检查状态与引用。用户上传的封面与视频都受保护，系统默认 `/cover.svg` 不参与清理。
+
+单条失败会继续处理其他记录，输出成功、跳过、失败数量及错误；正常结束退出码为 0，运行失败（含部分失败）为 1，参数错误为 2。Ctrl+C 或超时停止后续处理，已经完成的文件删除和事务提交不会撤销。当前没有自动定时任务；已发布文件及删除视频后的文件回收不属于此命令的范围。
+
+命令分支和失败行为通过 `go test ./cmd/cleanup-uploads` 使用替身测试；文件删除测试使用临时目录。MySQL 查询及行锁测试按原有 `GOSTREAM_INTEGRATION_TEST=1` 开关显式执行，不运行真实上传目录的批量删除。
+
+端到端验收测试会编译真实命令，在新建的临时 MySQL 数据库和临时上传目录中运行预览、`--execute` 和重复执行，验证过期视频及封面被清理，未过期、已发布和被引用的文件保留，以及 `deleting` 任务恢复（包括文件已不存在的情况）。它需要本地数据库账号拥有创建、删除测试数据库的权限；结束后删除本次生成的测试数据库，不对 `.env` 指向的项目数据库运行清理命令。
+
+```powershell
+$env:GOSTREAM_INTEGRATION_TEST = '1'
+try {
+    go test ./cmd/cleanup-uploads -run '^TestCleanupCommandE2E$' -count=1 -v
+} finally {
+    Remove-Item Env:GOSTREAM_INTEGRATION_TEST
+}
+```
+
+当前版本每轮按 ID 查询前 `limit` 条重试任务，持续失败的记录可能占满该批次；尚未实现重试退避、游标推进和失败任务隔离，也未启用定时调度。
+
 ## 环境与启动
 
 当前开发环境为 Windows、Go 1.27.1、MySQL 8.4.9。`go.mod` 声明 Go 1.27.1；尚未验证其他环境组合。MySQL 地址和端口可通过配置修改，本地学习实例使用 `127.0.0.1:13306`。
@@ -197,7 +233,7 @@ try {
 }
 ```
 
-测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。86 个子场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
+测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
 当前环境可能打印 Sonic 不支持该 Go 版本并回退到 `encoding/json` 的警告；已观察到现有测试可通过，不表示已完成依赖兼容性验证。
 
@@ -220,7 +256,7 @@ try {
 | `web/` | 原生前端页面、样式、交互和默认封面 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，仍是一个进程。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。当前保留 handler 中的 SQL，暂不增加独立的 service/repository 层。
+目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；尚未迁移的其他接口仍保留 handler 中的 SQL。
 
 ## 下一阶段
 
@@ -282,18 +318,21 @@ try {
 
 `node scripts/web_comments_test.cjs` 使用模拟 DOM/API 验证分页、文本安全显示、鉴权交互、提交和删除、失败重试、Unicode 长度、旧请求隔离及登录失效时保留草稿。点赞和上传的模拟测试同时通过。真实浏览器中的布局、焦点和滚动显示仍需页面验收。
 
-### 发表评论的分层示例
+### 评论与点赞的分层示例
 
-目前只重构发表评论这条链路，评论列表、删除评论及其他模块暂时沿用原有写法。文件仍处于 `internal/video` 包，不引入额外框架。
+发表评论、评论列表、删除评论，以及点赞、取消点赞、点赞状态查询均已分层。文件仍处于 `internal/video` 包，不引入额外框架。
 
 | 文件 | 职责 |
 | --- | --- |
-| `comment.go` 的 `Handler.CreateComment` | 读取已验证身份、解析 URL 和 JSON，将业务结果映射成 HTTP 状态和响应 |
-| `comment_service.go` | 去除首尾空白、校验 1～500 个 Unicode 字符，调用存储接口，组装结果 |
-| `comment_repository.go` | SQL 插入、识别目标视频不存在、读取受影响行数及自增 ID |
+| `comment.go` | 评论接口的身份、URL、JSON 与分页解析，将业务结果映射成 HTTP 响应 |
+| `comment_service.go` | 校验评论内容，将删除未命中转为业务错误，通过存储接口创建、查询和删除评论 |
+| `comment_repository.go` | 评论 SQL，视频存在性检查、分页、扫描结果、受影响行数及自增 ID |
+| `like.go` | 点赞接口的身份和视频 ID 解析，以及 HTTP 响应 |
+| `like_service.go` | 将重复点赞视为成功，通过存储接口执行点赞、取消和状态查询 |
+| `like_repository.go` | 点赞 SQL，将 MySQL 唯一键冲突转换为业务可识别的错误 |
 
 请求流向为 Handler → CommentService → CommentRepository → MySQL。Service 只依赖一个小的 Go interface，不依赖 Hertz 或数据库连接。`cmd/server/main.go` 依次创建 SQLCommentRepository、CommentService、Handler，并把前一个对象交给后一个对象；这是依赖传递，不是发起业务请求。Handler 暂时仍持有 DB，供尚未分层的其他处理函数使用。
 
 Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400、视频不存在映射为 404、存储异常映射为 500。原有请求、状态码、成功响应字段和安全错误提示保持不变。测试中的 Handler 也必须明确配置 CommentService。
 
-`go test -v ./internal/video -run '^TestCommentServiceCreateComment$'` 不启动 HTTP、不访问 MySQL，8 个子场景通过仓储替身验证非法内容不触发存储、内容规范化、中文及 emoji 边界、错误及 context 传递。现有真实 MySQL 的 86 个联调场景继续验证整条 HTTP → Service → Repository 链路。
+`go test -v ./internal/video -run '^TestCommentServiceCreateComment$'` 不启动 HTTP、不访问 MySQL，8 个子场景通过仓储替身验证非法内容不触发存储、内容规范化、中文及 emoji 边界、错误及 context 传递。其他 Service 测试验证删除、点赞及查询行为，真实 MySQL 联调继续验证整条 HTTP → Service → Repository 链路。

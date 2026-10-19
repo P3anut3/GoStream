@@ -15,7 +15,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/ut"
 )
 
-// A closed database simulates a query failure without stopping the real MySQL.
+// A closed database simulates failure to begin a transaction without stopping MySQL.
 func TestPublishDatabaseFailure(t *testing.T) {
 	dir := t.TempDir()
 	name := "test.mp4"
@@ -52,8 +52,8 @@ func TestPublishDatabaseFailure(t *testing.T) {
 	var failure struct {
 		Error string `json:"error"`
 	}
-	if err := json.Unmarshal(resp.Body(), &failure); err != nil || failure.Error != "检查上传文件归属失败" {
-		t.Fatal("expected a safe database-query failure response")
+	if err := json.Unmarshal(resp.Body(), &failure); err != nil || failure.Error != "发布视频失败" {
+		t.Fatal("expected a safe transaction-start failure response")
 	}
 	saved, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(saved, content) {

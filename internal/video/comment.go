@@ -2,7 +2,6 @@ package video
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log"
 	"net/http"
@@ -76,8 +75,9 @@ func (h *Handler) CreateComment(ctx context.Context, c *app.RequestContext) {
 }
 
 // 查看评论列表
+// 视频 ID、页码、每页数量的解析和检查仍属于 Handler。
 func (h *Handler) ListComments(ctx context.Context, c *app.RequestContext) {
-	// 获取视频ID
+	// 1、获取视频ID
 	videoID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || videoID == 0 {
 		c.JSON(http.StatusBadRequest, map[string]string{
@@ -103,68 +103,29 @@ func (h *Handler) ListComments(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	offset := (page - 1) * pageSize
-	// 确认目标视频存在
-	var foundID uint64
-	err = h.DB.QueryRowContext(ctx,
-		`SELECT id FROM videos WHERE id = ?`,
-		videoID,
-	).Scan(&foundID)
-
-	if errors.Is(err, sql.ErrNoRows) {
+	// 2、调用业务层查询评论
+	if h.CommentService == nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "评论服务未初始化",
+		})
+		return
+	}
+	comments, err := h.CommentService.ListComments(ctx, videoID, pageSize, offset)
+	// 错误分两类， 1、ErrCommentVideoNotFound不存在。2、其他错误	比如数据库连接失败、读取结果失败
+	if errors.Is(err, ErrCommentVideoNotFound) {
 		c.JSON(http.StatusNotFound, map[string]string{
-			"error": "视频不存在",
+			"error": ErrCommentVideoNotFound.Error(),
 		})
 		return
 	}
 	if err != nil {
-		log.Printf("检查视频失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "检查视频失败",
-		})
-		return
-	}
-
-	rows, err := h.DB.QueryContext(ctx,
-		`SELECT id, video_id, user_id, content, created_at
-	 FROM video_comments
-	 WHERE video_id = ?
-	 ORDER BY id DESC
-	 LIMIT ? OFFSET ?`,
-		videoID, pageSize, offset,
-	)
-	if err != nil {
-		log.Printf("评论列表查询失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "评论列表查询失败",
-		})
-		return
-	}
-	defer rows.Close()
-
-	//将查询到的结果返回
-	comments := make([]Comment, 0)
-	for rows.Next() {
-		var comment Comment
-		if err := rows.Scan(
-			&comment.ID,
-			&comment.VideoID,
-			&comment.UserID,
-			&comment.Content,
-			&comment.CreatedAt,
-		); err != nil {
-			log.Printf("读取评论失败: %v", err)
-			c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "读取评论失败",
-			})
-			return
+		log.Printf("查询评论列表失败: %v", err)
+		message := "评论列表查询失败"
+		var storageErr *commentStorageError
+		if errors.As(err, &storageErr) {
+			message = storageErr.message
 		}
-		comments = append(comments, comment)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("遍历评论列表失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "查询评论列表失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": message})
 		return
 	}
 	c.JSON(http.StatusOK, map[string]interface{}{
@@ -196,32 +157,33 @@ func (h *Handler) DeleteComment(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// 3. 同时匹配评论 ID 和评论者 ID
-	result, err := h.DB.ExecContext(ctx,
-		`DELETE FROM video_comments WHERE id = ? AND user_id = ?`,
-		commentID, userID,
-	)
+	// 3. 调用业务层的删除
+	if h.CommentService == nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "评论服务未初始化",
+		})
+		return
+	}
+
+	err = h.CommentService.DeleteComment(ctx, userID, commentID)
+	// 4、将业务层定义的错误转化为http响应
+	if errors.Is(err, ErrCommentNotFound) { // 评论未找到
+		c.JSON(http.StatusNotFound, map[string]string{
+			"error": ErrCommentNotFound.Error(),
+		})
+		return
+	}
 	if err != nil {
 		log.Printf("删除评论失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "删除评论失败",
-		})
+		message := "删除评论失败"
+		var storageErr *commentStorageError
+		if errors.As(err, &storageErr) {
+			message = storageErr.message
+		}
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": message})
 		return
 	}
-
-	affected, err := result.RowsAffected()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取删除结果失败",
-		})
-		return
-	}
-	if affected == 0 {
-		c.JSON(http.StatusNotFound, map[string]string{
-			"error": "评论不存在或不属于当前用户",
-		})
-		return
-	}
-
+	// 5、删除成功，无需返回响应体
 	c.Status(http.StatusNoContent)
+
 }

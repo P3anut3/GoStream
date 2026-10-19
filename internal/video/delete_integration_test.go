@@ -50,7 +50,7 @@ func TestDeleteIntegration(t *testing.T) {
 	h := server.New()
 	users := &user.UserHandler{DB: db, JWTSecret: secret}
 	uploadDir := t.TempDir()
-	videos := &Handler{DB: db, UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
+	videos := &Handler{DB: db, UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: db}), LikeService: NewLikeService(&SQLLikeRepository{DB: db})}
 	h.POST("/users", users.CreateUser)
 	h.POST("/login", users.Login)
 	h.POST("/videos", auth.JWTAuth(secret), videos.Publish)
@@ -58,6 +58,7 @@ func TestDeleteIntegration(t *testing.T) {
 	h.POST("/uploads/covers", auth.JWTAuth(secret), videos.UploadCover)
 	h.PUT("/videos/:id/like", auth.JWTAuth(secret), videos.Like)
 	h.DELETE("/videos/:id/like", auth.JWTAuth(secret), videos.UnLike)
+	h.GET("/videos/:id/like", auth.JWTAuth(secret), videos.GetLikeStatus)
 	h.POST("/videos/:id/comments", auth.JWTAuth(secret), videos.CreateComment)
 	h.GET("/videos/:id/comments", videos.ListComments)
 	h.DELETE("/comments/:id", auth.JWTAuth(secret), videos.DeleteComment)
@@ -490,6 +491,31 @@ func TestDeleteIntegration(t *testing.T) {
 			}
 		})
 	}
+	t.Run("status_query_separates_total_and_identity_without_writes", func(t *testing.T) {
+		for _, tc := range []struct {
+			token string
+			liked bool
+		}{{ownerToken, false}, {otherToken, true}} {
+			for i := 0; i < 2; i++ {
+				status, body := request(http.MethodGet, path+"/like", tc.token, nil)
+				if status != 200 {
+					t.Fatalf("expected 200, got %d", status)
+				}
+				var result struct {
+					Count uint64 `json:"like_count"`
+					Liked bool   `json:"liked"`
+				}
+				if err := json.Unmarshal(body, &result); err != nil || result.Count != 1 || result.Liked != tc.liked {
+					t.Fatalf("expected count 1 and liked %v, got %s", tc.liked, body)
+				}
+			}
+		}
+	})
+	t.Run("status_query_missing_video", func(t *testing.T) {
+		if status, _ := request(http.MethodGet, "/videos/18446744073709551615/like", ownerToken, nil); status != 404 {
+			t.Errorf("expected 404, got %d", status)
+		}
+	})
 	t.Run("unlike_only_removes_current_users_target", func(t *testing.T) {
 		for _, tc := range []struct {
 			uid, vid uint64

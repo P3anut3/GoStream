@@ -14,6 +14,61 @@ func (f commentRepositoryFunc) CreateComment(ctx context.Context, userID, videoI
 	return f(ctx, userID, videoID, content)
 }
 
+func (f commentRepositoryFunc) DeleteComment(context.Context, uint64, uint64) (bool, error) {
+	return false, errors.New("creation test must not call DeleteComment")
+}
+
+func (f commentRepositoryFunc) ListComments(context.Context, uint64, int, int) ([]Comment, error) {
+	return nil, errors.New("creation test must not call ListComments")
+}
+
+type deleteCommentRepositoryFunc func(context.Context, uint64, uint64) (bool, error)
+
+func (f deleteCommentRepositoryFunc) CreateComment(context.Context, uint64, uint64, string) (uint64, error) {
+	return 0, errors.New("deletion test must not call CreateComment")
+}
+
+func (f deleteCommentRepositoryFunc) DeleteComment(ctx context.Context, userID, commentID uint64) (bool, error) {
+	return f(ctx, userID, commentID)
+}
+
+func (f deleteCommentRepositoryFunc) ListComments(context.Context, uint64, int, int) ([]Comment, error) {
+	return nil, errors.New("deletion test must not call ListComments")
+}
+
+func TestCommentServiceDeleteComment(t *testing.T) {
+	databaseFailure := errors.New("test database unavailable")
+	for _, tc := range []struct {
+		name                       string
+		deleted                    bool
+		repositoryError, wantError error
+	}{
+		{name: "deleted_successfully", deleted: true},
+		{name: "missing_or_not_owned", wantError: ErrCommentNotFound},
+		{name: "database_error_preserved", repositoryError: databaseFailure, wantError: databaseFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			repository := deleteCommentRepositoryFunc(func(gotContext context.Context, userID, commentID uint64) (bool, error) {
+				calls++
+				if gotContext != ctx || userID != 12 || commentID != 34 {
+					t.Error("service must forward the request context, user identity and target comment ID")
+				}
+				return tc.deleted, tc.repositoryError
+			})
+			err := NewCommentService(repository).DeleteComment(ctx, 12, 34)
+			if !errors.Is(err, tc.wantError) {
+				t.Fatalf("expected error %v, got %v", tc.wantError, err)
+			}
+			if calls != 1 {
+				t.Errorf("expected one repository call, got %d", calls)
+			}
+		})
+	}
+}
+
 func TestCommentServiceCreateComment(t *testing.T) {
 	databaseFailure := errors.New("test repository unavailable")
 	for _, tc := range []struct {

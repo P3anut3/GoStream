@@ -44,11 +44,14 @@ func main() {
 	userHandler := &user.UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
 	commentRepository := &video.SQLCommentRepository{DB: db}
 	commentService := video.NewCommentService(commentRepository)
+	likeRepository := &video.SQLLikeRepository{DB: db}
+	likeService := video.NewLikeService(likeRepository)
 	videoHandler := &video.Handler{
 		DB:             db,
 		UploadDir:      "uploads/videos",
 		CoverDir:       "uploads/covers",
 		CommentService: commentService,
+		LikeService:    likeService,
 	}
 	h.POST("/users", userHandler.CreateUser)
 	h.POST("/login", userHandler.Login)
