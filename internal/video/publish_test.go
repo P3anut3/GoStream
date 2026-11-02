@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"gostream/internal/database"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,8 +12,8 @@ import (
 
 	"gostream/internal/auth"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
+	ut "gostream/internal/testutil"
 )
 
 // A closed database simulates failure to begin a transaction without stopping MySQL.
@@ -33,8 +34,8 @@ func TestPublishDatabaseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := server.New()
-	handler := &Handler{DB: db, UploadDir: dir}
+	h := gin.New()
+	handler := &Handler{DB: database.WrapSQL(db), UploadDir: dir}
 	h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
 	data, err := json.Marshal(map[string]string{
 		"title": "test", "play_url": "/media/videos/" + name, "cover_url": "/cover.svg",
@@ -42,7 +43,7 @@ func TestPublishDatabaseFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp := ut.PerformRequest(h.Engine, http.MethodPost, "/videos",
+	resp := ut.PerformRequest(h, http.MethodPost, "/videos",
 		&ut.Body{Body: bytes.NewReader(data), Len: len(data)},
 		ut.Header{Key: "Content-Type", Value: "application/json"},
 		ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()

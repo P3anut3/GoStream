@@ -34,7 +34,7 @@ function setup() {
     location: { origin: "http://localhost" }, URL, FormData, TextEncoder, setTimeout: () => 0, clearTimeout() {},
     fetch: async (url, request) => {
       calls.push({ url, request });
-      let status = 200, data = { videos: [] };
+      let status = 200, data = { videos: [], next_cursor: "", has_more: false };
       const u = new URL(url, "http://localhost");
       const detail = u.pathname.match(/^\/videos\/(\d+)$/);
       if (detail) data = { id: Number(detail[1]), author_id: 1, title: "test", play_url: "/media/videos/test.mp4", cover_url: "/cover.svg", created_at: "2026-10-18" };

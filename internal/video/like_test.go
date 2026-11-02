@@ -3,12 +3,13 @@ package video
 import (
 	"database/sql"
 	"encoding/json"
+	"gostream/internal/database"
 	"net/http"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	ut "gostream/internal/testutil"
 )
 
 func TestLikeValidationAndDatabaseFailure(t *testing.T) {
@@ -21,8 +22,8 @@ func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New()
-	handler := &Handler{DB: db, LikeService: NewLikeService(&SQLLikeRepository{DB: db})}
+	h := gin.New()
+	handler := &Handler{DB: database.WrapSQL(db), LikeService: NewLikeService(&SQLLikeRepository{DB: database.WrapSQL(db)})}
 	h.PUT("/videos/:id/like", auth.JWTAuth(secret), handler.Like)
 	h.GET("/videos/:id/like", auth.JWTAuth(secret), handler.GetLikeStatus)
 	h.DELETE("/videos/:id/like", auth.JWTAuth(secret), handler.UnLike)
@@ -43,7 +44,7 @@ func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 					if tc.token != "" {
 						headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + tc.token})
 					}
-					resp := ut.PerformRequest(h.Engine, method, "/videos/"+tc.id+"/like", nil, headers...).Result()
+					resp := ut.PerformRequest(h, method, "/videos/"+tc.id+"/like", nil, headers...).Result()
 					if resp.StatusCode() != tc.want {
 						t.Errorf("expected %d, got %d", tc.want, resp.StatusCode())
 					}

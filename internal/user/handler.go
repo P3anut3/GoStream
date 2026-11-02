@@ -1,23 +1,20 @@
 package user
 
 import (
-	"context"
-	"database/sql"
 	"errors"
+	"gostream/internal/auth"
+	"log"
 	"net/http"
 
-	"gostream/internal/auth"
-
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/go-sql-driver/mysql"
+	"github.com/gin-gonic/gin"
 )
 
 /*
-handler.go：收到请求后，校验参数、生成哈希、写数据库、返回响应
+handler.go：解析 HTTP 请求、调用业务层、签发登录凭证和返回响应。
 */
 type UserHandler struct {
-	DB        *sql.DB
 	JWTSecret []byte
+	Service   *UserService
 }
 
 // CreateUserRequest 接收客户端提交的注册信息，Password 是明文密码。
@@ -30,173 +27,137 @@ type LoginRequest struct { // 登录请求结构体
 	Password string `json:"password"`
 }
 
-// (h *UserHandler) 是接收者，让函数能够通过 h.DB 使用结构体中的数据库连接池。
-func (h *UserHandler) CreateUser(ctx context.Context, c *app.RequestContext) {
+// Handler 通过 Service 执行业务，不直接访问数据库。
+func (h *UserHandler) CreateUser(c *gin.Context) {
 	var req CreateUserRequest
-	// 1. 读取请求中的 JSON
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "请求体不是有效的用户JSON",
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求体不是有效的用户JSON"})
+		return
+	}
+
+	if h.Service == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "用户服务未初始化",
 		})
 		return
 	}
-	// 2. 检查参数
-	if req.Username == "" {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "username 不能为空",
+	user, err := h.Service.Register(
+		c.Request.Context(),
+		req.Username,
+		req.Password,
+	)
+	switch {
+	case errors.Is(err, ErrEmptyUsername),
+		errors.Is(err, ErrEmptyPassword),
+		errors.Is(err, ErrInvalidPasswordLength):
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": err.Error(),
+		})
+		return
+	case errors.Is(err, ErrUsernameExists):
+		c.JSON(http.StatusConflict, gin.H{
+			"error": ErrUsernameExists.Error(),
+		})
+		return
+	case err != nil:
+		log.Printf("注册失败：%v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "注册失败",
 		})
 		return
 	}
-	if req.Password == "" {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "password 不能为空",
-		})
-		return
-	}
-	if len(req.Password) < 8 || len(req.Password) > 72 {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "密码长度必须为 8～72 字节",
-		})
-		return
-	}
-	// 3. 生成密码哈希
-	passwordHash, err := HashPassword(req.Password) // hash处理密码，存储的是 hash密码而不是原密码
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "处理密码失败",
-		})
-		return
-	}
-	// 4. 组装用户对象
-	user := User{
-		Username:     req.Username,
-		PasswordHash: passwordHash,
-	}
-	// 5. 将用户写入数据库
-	result, err := h.DB.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", user.Username, user.PasswordHash)
-	if err != nil {
-		var mysqlErr *mysql.MySQLError
-		if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
-			c.JSON(http.StatusConflict, map[string]string{
-				"error": "用户名已经存在",
-			})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "保存用户失败",
-		})
-		return
-	}
-	//6. 获取数据库生成的用户ID
-	id, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取用户ID失败",
-		})
-		return
-	}
-	user.ID = uint64(id)
-	// 7. 返回创建结果
-	c.JSON(http.StatusCreated, map[string]interface{}{
+	c.JSON(http.StatusCreated, gin.H{
 		"id":       user.ID,
 		"username": user.Username,
 	})
 }
 
 // 登录
-func (h *UserHandler) Login(ctx context.Context, c *app.RequestContext) {
+func (h *UserHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	//绑定
-	if err := c.BindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "请求体格式错误",
 		})
 		return
 	}
-	if req.Username == "" || req.Password == "" {
-		c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "用户名和密码不能为空",
+	if h.Service == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "用户服务未初始化",
 		})
 		return
 	}
-	// 1、根据用户名查询用户
-	var user User
-	err := h.DB.QueryRowContext(ctx, "SELECT id,username,password_hash FROM users WHERE username = ?", req.Username).Scan(&user.ID, &user.Username, &user.PasswordHash) //它把查询结果按顺序填入变量：
-
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusUnauthorized, map[string]string{
-			"error": "用户名或密码错误",
+	user, err := h.Service.Login(c.Request.Context(), req.Username, req.Password)
+	switch {
+	case errors.Is(err, ErrEmptyCredentials):
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": ErrEmptyCredentials.Error(),
 		})
 		return
-	}
 
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
+	case errors.Is(err, ErrInvalidCredentials):
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": ErrInvalidCredentials.Error(),
+		})
+		return
+
+	case err != nil:
+		log.Printf("登录失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "查询用户失败",
 		})
 		return
 	}
-	//2、查询成功，校验数据库中的哈希密码
-	if err := CheckPassword(user.PasswordHash, req.Password); err != nil {
-		c.JSON(http.StatusUnauthorized, map[string]string{
-			"error": "用户名或密码错误",
-		})
-		return
-	}
-
-	//3、 生成 token
+	// Service 确认身份后，签发登陆凭证
 	token, err := auth.GenerateToken(user.ID, h.JWTSecret)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "生成登录凭证失败",
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "生成登陆凭证失败",
 		})
 		return
 	}
-	// 返回响应
-	c.JSON(http.StatusOK, map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"id":       user.ID,
 		"username": user.Username,
 		"token":    token,
 	})
-
 }
 
 // 读取信息
-func (h *UserHandler) Me(ctx context.Context, c *app.RequestContext) {
-	//1、去除中间件验证后的用户ID
+func (h *UserHandler) Me(c *gin.Context) {
+	//已经登陆了
 	value, exists := c.Get("userID")
-	if !exists {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "请求中缺少已验证的用户身份信息",
+	userID, ok := value.(uint64)
+	if !ok || userID == 0 || !exists {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "请求中缺少有效的用户身份",
 		})
 		return
 	}
-	userID, ok := value.(uint64) //类型断言
-	if !ok {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "用户身份类型错误",
+	if h.Service == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "用户服务未初始化",
 		})
 		return
 	}
-	//2、根据用户ID 查询数据库
-	var user User
-	err := h.DB.QueryRowContext(ctx, "SELECT id,username FROM users WHERE id = ?", userID).Scan(&user.ID, &user.Username)
-
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusUnauthorized, map[string]string{
+	user, err := h.Service.GetCurrentUser(c.Request.Context(), userID)
+	if errors.Is(err, ErrUserNotFound) {
+		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "当前用户已经不存在",
 		})
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
+		log.Printf("查询当前用户失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "查询用户失败",
 		})
 		return
 	}
-	// 3、返回公开的用户信息
-	c.JSON(http.StatusOK, map[string]interface{}{
-		"id":       userID,
+
+	c.JSON(http.StatusOK, gin.H{
+		"id":       user.ID,
 		"username": user.Username,
 	})
 }

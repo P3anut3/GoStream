@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.compose.example
 
 # Build outputs and logs
 *.exe
@@ -14,6 +15,12 @@
 
 # Uploaded media stays local
 /uploads/
+
+# Vue dependencies, generated assets and browser test evidence
+**/node_modules/
+/web/dist/
+/frontend/test-results/
+/frontend/playwright-report/
 
 # Generated static-file compression cache
 *.hertz.gz

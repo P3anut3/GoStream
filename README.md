@@ -1,14 +1,17 @@
 # GoStream
 
-一个用于学习 Go 后端开发的短视频后端项目，逐个模块实现和验证。当前完成用户认证、视频元数据管理、视频及封面本地上传、文件归属校验与公开文件访问，并提供原生 HTML/CSS/JavaScript 工作台。
+一个用于学习 Go 后端开发的短视频项目，逐个模块实现和验证。当前完成用户认证、视频元数据管理、视频及封面本地上传、文件归属校验与公开文件访问，并提供 Vue 3 + TypeScript + Pinia + Vue Router 工作台。
+
+开发与学习的统一入口：[项目主线与阶段计划](docs/learning/00_project_roadmap.md)、[模块设计与数据流](docs/learning/04_module_design.md)。M0 核心流程见 [验收记录](docs/learning/07_m0_acceptance.md)。配置管理、健康检查、[API 镜像](docs/learning/10_container_basics.md)、[Compose 持久化](docs/learning/12_compose_environment.md)、[Vue 迁移与真实双账号浏览器验收](docs/learning/13_vue_migration.md)已完成。基础 CI 工作流已准备；阶段提交、远端关联及 GitHub 首次运行仍待完成。
 
 ## 当前功能
 
-- Hertz HTTP 服务，单进程运行。
-- MySQL 用户存储，用户名唯一约束。
+- Gin HTTP 服务，单进程运行。
+- GORM + MySQL 数据访问，用户名唯一约束。
 - bcrypt 密码哈希与校验，不存储明文密码。
 - HS256 JWT，包含用户 ID、签发时间和两小时有效期。
 - Bearer token 鉴权中间件。
+- 公开健康检查：`GET /healthz` 不查数据库；`GET /readyz` 对数据库连接池执行最长 1 秒的 PingContext。成功返回 200、`{"status":"ok"}`；就绪失败返回 503、`{"status":"not_ready"}`，不返回底层错误，详见 [健康检查](docs/learning/09_health_checks.md)。
 - 密码、JWT 和鉴权中间件的基础单元测试。
 - 视频元数据存储、公开查询、分页查询和仅作者可删除的权限控制。
 - 显式开启的 MySQL 上传、发布、个人列表与删除权限集成测试。
@@ -16,7 +19,20 @@
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
 
-当前未引入 Redis、消息队列或微服务。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。Compose 已准备 Redis/RabbitMQ，Go 业务尚未接入；当前仍为单进程模块化应用。
+
+## Compose 快速启动
+
+Docker Desktop 运行后，在项目根目录执行：
+
+```powershell
+./scripts/init-compose-env.ps1
+docker compose --env-file .env.compose up -d --build --wait --wait-timeout 180
+```
+
+访问 `http://127.0.0.1:19080/`；RabbitMQ 管理页面为 `http://127.0.0.1:15674/`，账号 `gostream`、密码在本机忽略文件 `.env.compose`。初始化脚本不会覆盖已有文件。
+
+这套环境使用独立数据库和上传卷，不会自动导入 Windows MySQL 的旧账号、作品和本机 uploads 文件。普通 `docker compose --env-file .env.compose down` 保留数据；`down -v` 会删除卷。端口、服务名、初始化规则和测试方法见 [Compose 学习说明](docs/learning/12_compose_environment.md)。下面的“环境与启动”是直接在本机运行 Go 的另一种方式。
 
 ## 手动清理过期上传
 
@@ -35,13 +51,13 @@ go run ./cmd/cleanup-uploads --limit=20
 go run ./cmd/cleanup-uploads --execute --limit=100 --timeout=30s
 ```
 
-保留期限固定为 24 小时，使用与 HTTP 服务相同的 `uploads/videos` 和 `uploads/covers` 目录。`limit` 范围为 1～1000，分别限制重试任务和新增过期候选，一轮最多处理 `2 × limit` 条。优先重试 `deleting`，再处理过期 `pending`。预览不取得清理权，实际执行时仍重新锁定记录、检查状态与引用。用户上传的封面与视频都受保护，系统默认 `/cover.svg` 不参与清理。
+保留期限固定为 24 小时。清理命令与 API 共用 `internal/config/config.yaml` 及环境变量覆盖规则，读取同一 DSN 和媒体目录；相对目录按各自工作目录解析，因此均应从项目根目录运行。默认目录为 `uploads/videos`、`uploads/covers`，可通过 YAML 或环境变量修改。`limit` 范围为 1～1000，分别限制重试任务和新增过期候选，一轮最多处理 `2 × limit` 条。优先重试 `deleting`，再处理过期 `pending`。预览不取得清理权，实际执行时仍重新锁定记录、检查状态与引用。用户上传的封面与视频都受保护，系统默认 `/cover.svg` 不参与清理。
 
 单条失败会继续处理其他记录，输出成功、跳过、失败数量及错误；正常结束退出码为 0，运行失败（含部分失败）为 1，参数错误为 2。Ctrl+C 或超时停止后续处理，已经完成的文件删除和事务提交不会撤销。当前没有自动定时任务；已发布文件及删除视频后的文件回收不属于此命令的范围。
 
 命令分支和失败行为通过 `go test ./cmd/cleanup-uploads` 使用替身测试；文件删除测试使用临时目录。MySQL 查询及行锁测试按原有 `GOSTREAM_INTEGRATION_TEST=1` 开关显式执行，不运行真实上传目录的批量删除。
 
-端到端验收测试会编译真实命令，在新建的临时 MySQL 数据库和临时上传目录中运行预览、`--execute` 和重复执行，验证过期视频及封面被清理，未过期、已发布和被引用的文件保留，以及 `deleting` 任务恢复（包括文件已不存在的情况）。它需要本地数据库账号拥有创建、删除测试数据库的权限；结束后删除本次生成的测试数据库，不对 `.env` 指向的项目数据库运行清理命令。
+端到端验收测试编译真实命令，分别覆盖 YAML 自定义相对目录（无 `.env`）、环境变量覆盖 YAML/`.env` 的绝对目录、默认目录三种场景。每种场景新建独立的临时 MySQL 数据库和媒体目录，运行预览、`--execute` 和重复执行，验证过期视频及封面被清理，未过期、已发布和被引用的文件保留，`deleting` 任务可恢复（包括文件已不存在），旧目录及被覆盖目录的同名文件不变。它需要本地数据库账号拥有创建、删除测试数据库的权限；结束后删除本次生成的测试数据库，不对 `.env` 指向的项目数据库运行清理命令。
 
 ```powershell
 $env:GOSTREAM_INTEGRATION_TEST = '1'
@@ -87,6 +103,7 @@ Copy-Item .env.example .env
 ```dotenv
 GOSTREAM_DSN="root:YOUR_PASSWORD@tcp(127.0.0.1:13306)/gostream?charset=utf8mb4&parseTime=true&loc=Local"
 JWT_SECRET=REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_BYTES
+GOSTREAM_FEED_CURSOR_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_SECRET_AT_LEAST_32_BYTES
 ```
 
 将数据库密码和 JWT 密钥占位符替换成自己的配置。JWT 密钥应使用密码学随机源生成，例如在 PowerShell 中执行以下命令，将输出粘贴到 `JWT_SECRET`：
@@ -99,20 +116,34 @@ $jwtRng.Dispose()
 [BitConverter]::ToString($jwtKeyBytes).Replace("-", "")
 ```
 
-`.env` 已通过 `.gitignore` 排除，不提交真实密码、密钥或登录 token。应用当前要求 `.env` 文件存在；`godotenv.Load()` 默认不覆盖进程中已有的同名环境变量。
+`.env` 已通过 `.gitignore` 排除，不提交真实密码、密钥或登录 token。API 和清理命令都允许没有 `.env`，此时需要在进程环境中提供必要配置；文件存在但读取/解析失败仍会报错。`godotenv.Load()` 默认不覆盖进程中已有的同名环境变量。当前共用完整应用配置校验，清理命令也要求两项签名密钥有效，虽然清理业务本身不用 JWT。
+
+两个入口均会读取 `internal/config/config.yaml` 中的非敏感默认配置：
+
+```yaml
+http:
+  addr: "127.0.0.1:8080"
+storage:
+  video_dir: "uploads/videos"
+  cover_dir: "uploads/covers"
+```
+
+`GOSTREAM_HTTP_ADDR`、`GOSTREAM_VIDEO_DIR`、`GOSTREAM_COVER_DIR` 可覆盖上述对应项，也可写入本地 `.env`。最终配置在创建数据库连接前校验；密码和签名密钥只从环境变量读取。更换媒体目录不会自动迁移已有文件，HTTP 访问前缀仍为 `/media/videos`、`/media/covers`。
 
 ### 3. 下载依赖并运行
 
 ```powershell
 go mod download
+npm --prefix frontend ci
+npm --prefix frontend run build
 go run ./cmd/server
 ```
 
-从仓库根目录启动，以便读取 `.env`。服务监听 `127.0.0.1:8080`，按 Ctrl+C 停止。`OpenDB` 会检查数据库连接，但连接成功不代表表已存在。
+从仓库根目录启动，以便读取 YAML 和可选的 `.env`。服务默认监听 `127.0.0.1:8080`，实际地址由配置决定，按 Ctrl+C 停止。`OpenGORM` 会检查数据库连接，但连接成功不代表表已存在。
 
 ### 4. 打开前端工作台
 
-浏览器访问 `http://127.0.0.1:8080/`，无需 Node.js、npm 或前端构建。新增前端静态路由后需先重启 Go 服务；页面资源更新后可用 Ctrl+F5 强制刷新。
+浏览器访问 `http://127.0.0.1:8080/`。本机首次需要 Node.js 24 执行前端构建，Gin 提供 web/dist 中的静态产物；运行时不需要 Node。Compose 使用 Dockerfile 自动构建。前端开发热更新、测试和目录说明见 [frontend/README.md](frontend/README.md)。
 
 - 访客可浏览分页列表、按 ID 查看详情、播放可用的视频。
 - 点击“登录 / 注册”创建账号或登录；注册成功后尝试自动登录。token 仅在当前页面内存中保存，刷新或退出后需要重新登录。“退出”不代表服务端撤销已有 token。
@@ -121,7 +152,7 @@ go run ./cmd/server
 - 详情中仅向当前作者显示删除按钮，删除前二次确认；最终权限仍由后端判断。删除只移除数据库记录，当前不删除文件。上传后取消发布也可能留下文件。
 - 公共视频列表、详情和媒体文件是公开访问的；“我的视频”列表需要登录，未发布文件只要知道地址也可访问。页面不显示或持久化 token。
 
-浏览器与 API 使用同一来源。前端文件为 `web/index.html`、`web/style.css`、`web/app.js`、`web/cover.svg`，由 Hertz 的固定文件路由提供。没有额外部署到云端。
+浏览器与 API 使用同一来源。前端源码在 `frontend/src`，通过 Vite 构建到 `web/dist`，由 `httpx.RegisterWeb` 提供。页面使用 Hash 路由，例如 `/#/mine`、`/#/publish`、`/#/videos/1`；后端 JSON API 仍为 `/me/videos`、`/videos`、`/videos/1`。旧 web 页面保留作学习对照，不再由当前路由或镜像提供。没有部署到云端。
 
 ## HTTP 接口
 
@@ -138,6 +169,7 @@ go run ./cmd/server
 | DELETE | `/comments/:id` | Bearer token | 204，无响应体，仅评论作者可删除 |
 | GET | `/videos/:id` | 无 | 200，视频元数据 |
 | GET | `/videos` | 无 | 200，分页参数及视频数组 |
+| GET | `/feed` | 可选 Bearer token；提供时须有效 | 200，最新视频及作者/点赞信息、字符串游标和 `has_more` |
 | GET | `/me/videos` | Bearer token | 200，仅当前用户的视频及分页参数 |
 | DELETE | `/videos/:id` | Bearer token | 204，无响应体，仅作者可删除 |
 | GET | `/videos/:id/like` | Bearer token | 200，`like_count` 和当前用户的 `liked` |
@@ -198,6 +230,14 @@ token 缺失、格式不正确、签名校验失败或过期返回 401；数据�
 
 详情示例：`GET /videos/1`。ID 非法或为 0 返回 400，不存在返回 404，数据库错误返回 500。成功返回 `id`、`author_id`、`title`、`play_url`、`cover_url`、`created_at`。
 
+最新视频流：`GET /feed?limit=10`；继续加载时将响应的 `next_cursor` 原样作为 `cursor` 查询参数传回（通过 URL 参数工具编码）。按 `created_at DESC, id DESC` 排序；limit 不传或为 0 时默认 10，大于 50 时按 50 处理，负数或格式错误返回 400。响应包含 `videos`、`next_cursor`、`has_more`，没有更多数据时游标为空，空列表为 `[]`。非法游标返回 400 和 `INVALID_CURSOR`；数据库错误返回 500 和 `INTERNAL_ERROR`。游客可访问。刷新时清除游标；分页位置不代表用户实际观看进度。
+
+Feed 游标签名使用独立的 `GOSTREAM_FEED_CURSOR_SECRET`，至少 32 字节，采用密码学随机源生成，与 JWT 密钥分开；部署多个实例时保持一致。密钥变化会使已有游标失效。公共页面已接入 Feed，“加载更多”追加结果，“刷新”和更改每批条数重新加载第一批；发布成功回到公共流刷新。“我的视频”仍使用独立页码分页。失败保留已有公共视频，游标失效时提示刷新，旧请求结果不能覆盖新列表。组合索引迁移和隔离执行计划验证见 [索引记录](docs/learning/05_feed_index_verification.md)。
+
+Feed 每条视频新增 `author_name`、`like_count`、`liked`，分别表示作者名、总点赞数和当前用户是否点赞。游客可查看作者和总数，`liked=false`；携带 token 时必须验证，错误凭证返回 401。非空批次共 3 次数据库读取：视频、批量作者、批量点赞聚合；空批次仅查询视频。个人状态不允许进入共享 HTTP 缓存。前端登录/退出时刷新列表，卡片展示作者、计数及已点赞标记。实现和测试证据见 [批量补全说明](docs/learning/06_feed_metadata.md)。
+
+`node scripts/web_feed_test.cjs` 使用模拟 DOM/API 验证游标传递、刷新、追加、失败重试、模式切换、退出登录和请求竞态；`node scripts/web_publish_test.cjs` 同时验证发布后刷新公共流。它们不替代实际浏览器的布局与播放验收。
+
 列表示例：`GET /videos?page=1&page_size=5`。默认页码 1、每页 10 条；页码范围 1～10000，每页范围 1～100，非法参数返回 400。偏移量为 `(page-1)*page_size`。响应包含 `page`、`page_size`、`videos`；没有记录时 `videos` 为 `[]`。列表按 `id DESC` 排序；并发新增或删除时，OFFSET 分页仍可能发生偏移。
 
 删除示例：`DELETE /videos/1`。SQL 同时匹配视频 ID 和当前用户 ID。ID 非法返回 400，无有效 token 返回 401，没有匹配到属于自己的记录返回 404，删除成功返回 204 且无响应体，数据库错误返回 500。当前只删除元数据，不涉及文件清理。
@@ -241,11 +281,13 @@ try {
 
 | 文件 | 用途 |
 | --- | --- |
-| `cmd/server/main.go` | 加载配置、装配数据库和 handler、注册路由、启动 Hertz |
-| `internal/user/handler.go` | 注册、登录和当前用户查询，以及用户接口的请求类型 |
+| `cmd/server/main.go` | 加载配置、装配数据库和 handler、注册路由、启动 Gin |
+| `internal/user/handler.go` | 用户接口参数解析、HTTP 响应与登录凭证签发 |
+| `internal/user/service.go`、`repository.go`、`errors.go` | 用户业务规则、GORM 存储及可识别错误 |
 | `internal/user/model.go` | 用户模型 |
 | `internal/user/password.go` | bcrypt 哈希生成和校验 |
-| `internal/database/mysql.go` | 创建 MySQL 连接池并检查连接 |
+| `internal/database/mysql.go`、`gorm.go` | 创建 MySQL 连接池、检查连接并初始化 GORM |
+| `internal/httpx/http.go` | 完整请求体限制、multipart 临时文件清理和公开媒体访问 |
 | `internal/auth/jwt.go` | JWT 签发和验证 |
 | `internal/auth/middleware.go` | Bearer token 鉴权中间件 |
 | `internal/auth/*_test.go`、`internal/user/*_test.go` | 基础单元测试 |
@@ -253,14 +295,17 @@ try {
 | `internal/video/delete_integration_test.go` | 连接 MySQL 的删除权限集成测试 |
 | `internal/video/storage.go`、`storage_test.go` | 文件保存和测试 |
 | `internal/video/upload_test.go` | 上传与公开文件读取测试 |
-| `web/` | 原生前端页面、样式、交互和默认封面 |
+| `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
+| `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
+| `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
+| `.github/workflows/ci.yml` | Go 检查/race、前端检查/构建和浏览器夹具回归 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；尚未迁移的其他接口仍保留 handler 中的 SQL。
+目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
 
 ## 下一阶段
 
-视频及封面归属校验、封面上传、列表按 ID 倒序已实现。后续可完善遗留文件清理、图片完整性检查及自动封面处理。当前没有实现 token 刷新、主动撤销、登录限流等功能，不将此学习版本视为完整的生产认证系统。
+下一项业务是 M2 关注关系与关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 已编写，但仓库没有远端，尚未在 GitHub 实际触发。
 
 ### 上传表迁移
 
@@ -278,11 +323,11 @@ try {
 
 `go test -v ./internal/video -run '^TestUploadCover$'` 使用测试数据库替身，覆盖 17 个上传场景及静态图片访问、原始字节保存、失败清理；真实 MySQL 的封面上传记录验证包含在 `TestDeleteIntegration` 中。
 
-前端发布逻辑可运行 `node scripts/web_publish_test.cjs` 验证。测试模拟 DOM 和 API 响应，覆盖默认封面、上传顺序、失败重试、更换及移除图片、大小类型校验和登录失效；不代表真实浏览器显示、图片解码或实际网络联调已验证。
+当前 Vue 发布测试见 `frontend/tests`，通过 `npm --prefix frontend test` 和构建后的 `npm --prefix frontend run test:e2e` 运行。原 `scripts/web_publish_test.cjs` 仅用于迁移前页面，不能证明 Vue 正确。
 
 ### 本阶段页面验收
 
-自动测试覆盖接口权限、真实数据库记录、静态资源字节以及模拟 DOM 中的发布交互。页面实际效果仍需在真实浏览器确认：选择视频和封面发布后显示图片且可播放；不选封面使用默认图；两个账号的“我的视频”互不混入；删除仅允许作者。此前已人工确认视频上传和播放，新增封面 UI 的实际渲染未自动验证。
+Vue 迁移已完成 Chromium 响应夹具回归和隔离 Compose 中的真实双账号验收，覆盖上传及封面、发布、MP4 解码播放、Range、Feed/个人分页、点赞评论和跨账号权限。详见 [迁移与验收记录](docs/learning/13_vue_migration.md)，不宣称所有浏览器兼容或所有编码格式可播放。
 
 ### 点赞
 
@@ -314,9 +359,9 @@ try {
 
 ### 前端评论区
 
-详情窗口提供每页 5 条的公开评论列表、上一页/下一页和刷新。登录后可提交 1～500 个 Unicode 字符的评论，成功后回到第一页；失败保留输入并提示先刷新确认，防止网络异常时重复发送。仅对当前评论作者显示删除按钮，确认后调用后端权限校验；删掉末页唯一评论时回到上一页。评论内容通过 textContent 输出，不作为 HTML 解析。切换视频、关闭详情或切换账号会使旧请求失效。
+详情页提供每页 5 条的公开评论列表、上一页/下一页和刷新。登录后可提交 1～500 个 Unicode 字符的评论，成功后回到第一页；失败保留输入。网络异常时先刷新确认结果再手动重试，当前没有评论提交的请求幂等键。仅对当前评论作者显示删除按钮，确认后调用后端权限校验；删掉末页唯一评论时回到上一页。评论通过 Vue 文本插值输出，不作为 HTML 解析。切换视频、离开详情或切换账号会使旧请求失效。
 
-`node scripts/web_comments_test.cjs` 使用模拟 DOM/API 验证分页、文本安全显示、鉴权交互、提交和删除、失败重试、Unicode 长度、旧请求隔离及登录失效时保留草稿。点赞和上传的模拟测试同时通过。真实浏览器中的布局、焦点和滚动显示仍需页面验收。
+评论与点赞的当前前端回归位于 `frontend/tests/e2e`；真实浏览器测试由隔离 Compose 入口执行，见迁移文档。旧 `scripts/web_comments_test.cjs` 等保留为历史测试，不作为 Vue 验收证据。
 
 ### 评论与点赞的分层示例
 
@@ -331,7 +376,7 @@ try {
 | `like_service.go` | 将重复点赞视为成功，通过存储接口执行点赞、取消和状态查询 |
 | `like_repository.go` | 点赞 SQL，将 MySQL 唯一键冲突转换为业务可识别的错误 |
 
-请求流向为 Handler → CommentService → CommentRepository → MySQL。Service 只依赖一个小的 Go interface，不依赖 Hertz 或数据库连接。`cmd/server/main.go` 依次创建 SQLCommentRepository、CommentService、Handler，并把前一个对象交给后一个对象；这是依赖传递，不是发起业务请求。Handler 暂时仍持有 DB，供尚未分层的其他处理函数使用。
+请求流向为 Handler → CommentService → CommentRepository → MySQL。Service 只依赖一个小的 Go interface，不依赖 Gin 或数据库连接。`cmd/server/main.go` 依次创建 SQLCommentRepository、CommentService、Handler，并把前一个对象交给后一个对象；这是依赖传递，不是发起业务请求。Handler 暂时仍持有 DB，供尚未分层的其他处理函数使用。
 
 Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400、视频不存在映射为 404、存储异常映射为 500。原有请求、状态码、成功响应字段和安全错误提示保持不变。测试中的 Handler 也必须明确配置 CommentService。
 

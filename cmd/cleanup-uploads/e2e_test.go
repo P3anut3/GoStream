@@ -44,6 +44,25 @@ func TestCleanupCommandE2E(t *testing.T) {
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build cleanup binary: %v\n%s", err, output)
 	}
+	for _, scenario := range []cleanupConfigScenario{
+		{name: "yaml_relative_without_dotenv"},
+		{name: "environment_absolute_overrides_yaml_and_dotenv", environmentOverride: true, dotenv: true},
+		{name: "default_directories_with_dotenv", defaultDirectories: true, dotenv: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			runCleanupConfigScenario(t, ctx, binary, cfg, scenario)
+		})
+	}
+}
+
+type cleanupConfigScenario struct {
+	name                                            string
+	environmentOverride, defaultDirectories, dotenv bool
+}
+
+func runCleanupConfigScenario(t *testing.T, ctx context.Context, binary string, cfg *mysql.Config, scenario cleanupConfigScenario) {
+	t.Helper()
+	root := t.TempDir()
 
 	var random [8]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -93,10 +112,35 @@ func TestCleanupCommandE2E(t *testing.T) {
 	if tables != 5 {
 		t.Fatalf("expected current five-table schema, created %d tables", tables)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("# E2E configuration is supplied through the child environment.\n"), 0600); err != nil {
+	if scenario.dotenv {
+		// These fallback values must not override the explicit child environment.
+		fallback := "GOSTREAM_DSN=invalid-fallback\nJWT_SECRET=short-fallback\nGOSTREAM_FEED_CURSOR_SECRET=short-fallback\nGOSTREAM_HTTP_ADDR=invalid-fallback\n"
+		if scenario.environmentOverride {
+			fallback += "GOSTREAM_VIDEO_DIR=dotenv/videos\nGOSTREAM_COVER_DIR=dotenv/covers\n"
+		}
+		if err := os.WriteFile(filepath.Join(root, ".env"), []byte(fallback), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	yamlVideo, yamlCover := "configured media/videos", "configured media/covers"
+	if scenario.defaultDirectories {
+		yamlVideo, yamlCover = "uploads/videos", "uploads/covers"
+	}
+	if scenario.environmentOverride {
+		yamlVideo, yamlCover = "yaml-media/videos", "yaml-media/covers"
+	}
+	configDir := filepath.Join(root, "internal", "config")
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	videoDir, coverDir := filepath.Join(root, "uploads", "videos"), filepath.Join(root, "uploads", "covers")
+	yamlBody := fmt.Sprintf("http:\n  addr: \"127.0.0.1:8080\"\nstorage:\n  video_dir: %q\n  cover_dir: %q\n", yamlVideo, yamlCover)
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte(yamlBody), 0600); err != nil {
+		t.Fatal(err)
+	}
+	videoDir, coverDir := filepath.Join(root, filepath.FromSlash(yamlVideo)), filepath.Join(root, filepath.FromSlash(yamlCover))
+	if scenario.environmentOverride {
+		videoDir, coverDir = filepath.Join(root, "actual media", "videos"), filepath.Join(root, "actual media", "covers")
+	}
 	for _, dir := range []string{videoDir, coverDir} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
@@ -116,6 +160,7 @@ func TestCleanupCommandE2E(t *testing.T) {
 		remove, missing    bool
 	}
 	fixtures := make([]fixture, 0, 7)
+	var decoys []string
 	for i, tc := range []struct {
 		kind, status    string
 		age             time.Duration
@@ -149,6 +194,25 @@ func TestCleanupCommandE2E(t *testing.T) {
 			t.Fatal(err)
 		}
 		fixtures = append(fixtures, fixture{uint64(id), path, name, tc.status, tc.remove, tc.missing})
+		// Same-name files at discarded configuration paths must remain untouched.
+		for _, pair := range [][2]string{{"uploads/videos", "uploads/covers"}, {"yaml-media/videos", "yaml-media/covers"}, {"dotenv/videos", "dotenv/covers"}} {
+			relative := pair[0]
+			if tc.kind == "cover" {
+				relative = pair[1]
+			}
+			decoyDir := filepath.Join(root, filepath.FromSlash(relative))
+			if decoyDir == videoDir || decoyDir == coverDir {
+				continue
+			}
+			if err := os.MkdirAll(decoyDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			decoyPath := filepath.Join(decoyDir, name)
+			if err := os.WriteFile(decoyPath, []byte("protected configuration decoy"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			decoys = append(decoys, decoyPath)
+		}
 	}
 	if _, err := db.ExecContext(ctx, "INSERT INTO videos(author_id,title,play_url,cover_url) VALUES (?,?,?,?)", uid, "protected E2E video", "/media/videos/"+fixtures[3].name, "/media/covers/"+fixtures[4].name); err != nil {
 		t.Fatal(err)
@@ -158,16 +222,31 @@ func TestCleanupCommandE2E(t *testing.T) {
 		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = root
 		for _, entry := range os.Environ() {
-			if !strings.HasPrefix(strings.ToUpper(entry), "GOSTREAM_DSN=") {
-				cmd.Env = append(cmd.Env, entry)
+			key, _, _ := strings.Cut(entry, "=")
+			switch strings.ToUpper(key) {
+			case "GOSTREAM_DSN", "JWT_SECRET", "GOSTREAM_FEED_CURSOR_SECRET", "GOSTREAM_HTTP_ADDR", "GOSTREAM_VIDEO_DIR", "GOSTREAM_COVER_DIR":
+				continue
 			}
+			cmd.Env = append(cmd.Env, entry)
 		}
-		cmd.Env = append(cmd.Env, "GOSTREAM_DSN="+testConfig.FormatDSN())
+		cmd.Env = append(cmd.Env, "GOSTREAM_DSN="+testConfig.FormatDSN(), "JWT_SECRET="+strings.Repeat("j", 32), "GOSTREAM_FEED_CURSOR_SECRET="+strings.Repeat("f", 32), "GOSTREAM_HTTP_ADDR=127.0.0.1:19080")
+		if scenario.environmentOverride {
+			cmd.Env = append(cmd.Env, "GOSTREAM_VIDEO_DIR="+videoDir, "GOSTREAM_COVER_DIR="+coverDir)
+		}
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("isolated cleanup command failed: %v\n%s", err, output)
 		}
 		return string(output)
+	}
+	checkDecoys := func(t *testing.T) {
+		t.Helper()
+		for _, path := range decoys {
+			content, err := os.ReadFile(path)
+			if err != nil || string(content) != "protected configuration decoy" {
+				t.Fatal("cleanup changed a file outside the configured media directories")
+			}
+		}
 	}
 	checkFixture := func(t *testing.T, f fixture, deleted bool) {
 		t.Helper()
@@ -197,6 +276,7 @@ func TestCleanupCommandE2E(t *testing.T) {
 		for _, f := range fixtures {
 			checkFixture(t, f, false)
 		}
+		checkDecoys(t)
 	})
 	if t.Failed() {
 		return
@@ -209,6 +289,7 @@ func TestCleanupCommandE2E(t *testing.T) {
 		for _, f := range fixtures {
 			checkFixture(t, f, f.remove)
 		}
+		checkDecoys(t)
 		var count int
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM videos").Scan(&count); err != nil || count != 1 {
 			t.Fatal("published video must remain")
@@ -225,5 +306,6 @@ func TestCleanupCommandE2E(t *testing.T) {
 		for _, f := range fixtures {
 			checkFixture(t, f, f.remove)
 		}
+		checkDecoys(t)
 	})
 }

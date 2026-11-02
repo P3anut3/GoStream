@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"gostream/internal/config"
 	"io"
 	"os"
 	"os/signal"
@@ -108,29 +109,45 @@ func printUploads(out io.Writer, title string, uploads []video.Upload) {
 }
 
 func openRuntime() (cleanupRuntime, error) {
-	if err := godotenv.Load(); err != nil {
-		return cleanupRuntime{}, errors.New("加载 .env 失败，请从项目根目录运行")
+	if err := godotenv.Load(); err != nil &&
+		!errors.Is(err, os.ErrNotExist) {
+		return cleanupRuntime{}, errors.New("加载 .env 失败")
 	}
-	dsn := os.Getenv("GOSTREAM_DSN")
-	if dsn == "" {
-		return cleanupRuntime{}, errors.New("缺少 GOSTREAM_DSN 配置")
+
+	// 使用与 API 相同的配置加载规则。
+	cfg, err := config.Load("internal/config/config.yaml")
+	if err != nil {
+		return cleanupRuntime{}, err
 	}
-	videoDir, err := filepath.Abs("uploads/videos")
+
+	// 将配置中的目录转换为绝对路径。
+	videoDir, err := filepath.Abs(cfg.Storage.VideoDir)
 	if err != nil {
 		return cleanupRuntime{}, errors.New("无法解析视频上传目录")
 	}
-	coverDir, err := filepath.Abs("uploads/covers")
+
+	coverDir, err := filepath.Abs(cfg.Storage.CoverDir)
 	if err != nil {
 		return cleanupRuntime{}, errors.New("无法解析封面上传目录")
 	}
-	db, err := database.OpenDB(dsn)
+
+	db, err := database.OpenGORM(cfg.Database.DSN)
 	if err != nil {
-		return cleanupRuntime{}, errors.New("连接数据库失败，请检查本地配置和 MySQL 服务")
+		return cleanupRuntime{}, errors.New(
+			"连接数据库失败，请检查配置和 MySQL 服务",
+		)
 	}
+
 	repository := &video.SQLUploadRepository{DB: db}
+
 	return cleanupRuntime{
 		repository: repository,
-		runner:     video.NewUploadCleanupService(repository, videoDir, coverDir),
-		close:      func() { db.Close() },
+		runner: video.NewUploadCleanupService(
+			repository, videoDir, coverDir,
+		),
+		close: func() {
+			pool, _ := db.DB()
+			pool.Close()
+		},
 	}, nil
 }

@@ -26,7 +26,7 @@ func TestListExpiredPendingInvalidLimit(t *testing.T) {
 func TestListExpiredPendingDatabaseFailure(t *testing.T) {
 	db := sql.OpenDB(&uploadTestStore{})
 	db.Close()
-	if _, err := (&SQLUploadRepository{DB: db}).ListExpiredPending(context.Background(), time.Now(), 100); err == nil {
+	if _, err := (&SQLUploadRepository{DB: database.WrapSQL(db)}).ListExpiredPending(context.Background(), time.Now(), 100); err == nil {
 		t.Fatal("database errors must not be reported as an empty successful list")
 	}
 }
@@ -119,7 +119,7 @@ func TestListExpiredPendingIntegration(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	repo := &SQLUploadRepository{DB: db}
+	repo := &SQLUploadRepository{DB: database.WrapSQL(db)}
 	items, err := repo.ListExpiredPending(ctx, before, 1000)
 	if err != nil {
 		t.Fatal(err)

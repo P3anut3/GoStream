@@ -1,8 +1,6 @@
 package video
 
 import (
-	"context"
-	"database/sql"
 	"errors"
 	"io"
 	"log"
@@ -13,11 +11,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Handler struct { // 持有数据库连接池，后续提供处理方法
-	DB             *sql.DB
+	DB             *gorm.DB
 	UploadDir      string
 	CoverDir       string
 	CommentService *CommentService
@@ -31,7 +31,8 @@ type PublishRequest struct { // 接收客户端提交的发布信息
 }
 
 // 查看视频
-func (h *Handler) GetByID(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) GetByID(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、将路径中的字符串转化为视频ID
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64) //取得路径参数，类型是字符串。转化为10进制
 	if err != nil || id == 0 {
@@ -42,13 +43,9 @@ func (h *Handler) GetByID(ctx context.Context, c *app.RequestContext) {
 	}
 	// 2、查询视频
 	var video Video
-	err = h.DB.QueryRowContext(
-		ctx,
-		`SELECT id,author_id, title, play_url, cover_url ,created_at FROM videos WHERE  id =?`,
-		id,
-	).Scan(&video.ID, &video.AuthorID, &video.Title, &video.PlayURL, &video.CoverURL, &video.CreatedAt)
+	err = h.DB.WithContext(ctx).Where("id = ?", id).Take(&video).Error
 	// 3、区分 “不存在”和“查询失败”
-	if errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, map[string]string{
 			"error": "视频不存在",
 		})
@@ -73,7 +70,8 @@ func (h *Handler) GetByID(ctx context.Context, c *app.RequestContext) {
 }
 
 // 查看公共视频列表
-func (h *Handler) List(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) List(c *gin.Context) {
+	ctx := c.Request.Context()
 	pageText := c.DefaultQuery("page", "1")
 	sizeText := c.DefaultQuery("page_size", "10")
 
@@ -92,41 +90,11 @@ func (h *Handler) List(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	offset := (page - 1) * pageSize
-	rows, err := h.DB.QueryContext(ctx,
-		`SELECT id,author_id,title,play_url,cover_url,created_at FROM videos ORDER BY id DESC LIMIT ? OFFSET ?`, pageSize, offset,
-	)
+	videos := make([]Video, 0)
+	err = h.DB.WithContext(ctx).Order("id DESC").Limit(pageSize).Offset(offset).Find(&videos).Error
 	if err != nil {
 		log.Printf("视频列表查询失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "视频列表查询失败",
-		})
-		return
-	}
-	defer rows.Close()
-
-	//将查询到的结果返回
-	videos := make([]Video, 0)
-	for rows.Next() {
-		var video Video
-		if err := rows.Scan(
-			&video.ID, &video.AuthorID,
-			&video.Title,
-			&video.PlayURL,
-			&video.CoverURL,
-			&video.CreatedAt); err != nil {
-			log.Printf("读取视频记录失败: %v", err)
-			c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "读取视频记录失败",
-			})
-			return
-		}
-		videos = append(videos, video)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("便利视频列表失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "查询视频列表失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "视频列表查询失败"})
 		return
 	}
 	c.JSON(http.StatusOK, map[string]interface{}{
@@ -137,7 +105,8 @@ func (h *Handler) List(ctx context.Context, c *app.RequestContext) {
 }
 
 // 查看自己的视频列表
-func (h *Handler) ListMine(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) ListMine(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、获取用户ID
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -165,41 +134,11 @@ func (h *Handler) ListMine(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	offset := (page - 1) * pageSize
-	rows, err := h.DB.QueryContext(ctx,
-		`SELECT id,author_id,title,play_url,cover_url,created_at FROM videos WHERE author_id= ? ORDER BY id DESC LIMIT ? OFFSET ?`, userID, pageSize, offset,
-	)
+	videos := make([]Video, 0)
+	err = h.DB.WithContext(ctx).Where("author_id = ?", userID).Order("id DESC").Limit(pageSize).Offset(offset).Find(&videos).Error
 	if err != nil {
 		log.Printf("视频列表查询失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "视频列表查询失败",
-		})
-		return
-	}
-	defer rows.Close()
-
-	//将查询到的结果返回
-	videos := make([]Video, 0)
-	for rows.Next() {
-		var video Video
-		if err := rows.Scan(
-			&video.ID, &video.AuthorID,
-			&video.Title,
-			&video.PlayURL,
-			&video.CoverURL,
-			&video.CreatedAt); err != nil {
-			log.Printf("读取视频记录失败: %v", err)
-			c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "读取视频记录失败",
-			})
-			return
-		}
-		videos = append(videos, video)
-	}
-	if err := rows.Err(); err != nil {
-		log.Printf("便利视频列表失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "查询视频列表失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "视频列表查询失败"})
 		return
 	}
 	c.JSON(http.StatusOK, map[string]interface{}{
@@ -210,7 +149,8 @@ func (h *Handler) ListMine(ctx context.Context, c *app.RequestContext) {
 }
 
 // 删除视频
-func (h *Handler) Delete(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) Delete(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、取得经过验证的当前用户ID
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -229,37 +169,22 @@ func (h *Handler) Delete(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	// 3、只删除当前用户拥有的视频
-	result, err := h.DB.ExecContext(
-		ctx,
-		`DELETE FROM videos WHERE id=? AND author_id=?`, vidoID, userID,
-	)
-	if err != nil {
-		log.Printf("删除视频失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "删除视频失败",
-		})
+	result := h.DB.WithContext(ctx).Where("id = ? AND author_id = ?", vidoID, userID).Delete(&Video{})
+	if result.Error != nil {
+		log.Printf("删除视频失败: %v", result.Error)
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "删除视频失败"})
 		return
 	}
-	// 4、检查实际删除了多少行
-	affected, err := result.RowsAffected()
-	if err != nil {
-		log.Printf("获取删除结果失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取删除结果失败",
-		})
-		return
-	}
-	if affected == 0 {
-		c.JSON(http.StatusNotFound, map[string]string{
-			"error": "视频不存在或不属于当前用户",
-		})
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, map[string]string{"error": "视频不存在或不属于当前用户"})
 		return
 	}
 	c.Status(http.StatusNoContent)
 }
 
 // 创建视频作品记录。
-func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) Publish(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、取得JWT 中间件验证后的作者身份信息
 	value, exists := c.Get("userID")
 	authorID, ok := value.(uint64)
@@ -271,7 +196,7 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 	}
 	// 2、解析请求体
 	var req PublishRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "请求体格式错误",
 		})
@@ -303,145 +228,80 @@ func (h *Handler) Publish(ctx context.Context, c *app.RequestContext) {
 		})
 		return
 	}
-	// tx表示本次事务。后面的数据库操作必须通过它执行，才能属于同一个事务。不会只创建了视频记录，却没更新上传状态；也不会只更新上传状态，却没创建视频记录。
-	tx, err := h.DB.BeginTx(ctx, nil)
-	if err != nil {
-		log.Printf("开启发布事务失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "发布视频失败",
-		})
+	// Video metadata and upload states commit together. Locking reads
+	// coordinate with ClaimExpired, which locks these same upload rows.
+	tx := h.DB.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		log.Printf("开启发布事务失败: %v", tx.Error)
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "发布视频失败"})
 		return
 	}
 	defer tx.Rollback()
-
-	// 验证上传用户是否是当前用户
-	var videoUploadID, coverUploadID uint64
-	var videoStatus, coverStatus string
-	err = tx.QueryRowContext(
-		ctx,
-		`SELECT id, status FROM uploads
-	 WHERE saved_name = ? AND user_id = ? AND file_type = ?
-	 FOR UPDATE`,
-		savedName, authorID, "video",
-	).Scan(&videoUploadID, &videoStatus)
-	// 查不到属于自己的上传记录”应返回 403
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusForbidden, map[string]string{
-			"error": "上传文件不存在或不属于当前用户",
-		})
+	var videoUpload Upload
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").Where("saved_name = ? AND user_id = ? AND file_type = ?", savedName, authorID, "video").Take(&videoUpload).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusForbidden, map[string]string{"error": "上传文件不存在或不属于当前用户"})
 		return
 	}
 	if err != nil {
 		log.Printf("查询上传文件归属失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "检查上传文件归属失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "检查上传文件归属失败"})
 		return
 	}
-	if videoStatus != "pending" && videoStatus != "published" {
-		c.JSON(http.StatusConflict, map[string]string{
-			"error": "视频文件正在清理或不可使用，请重新上传",
-		})
+	if videoUpload.Status != "pending" && videoUpload.Status != "published" {
+		c.JSON(http.StatusConflict, map[string]string{"error": "视频文件正在清理或不可使用，请重新上传"})
 		return
 	}
-
-	// 默认封面属于系统资源；用户上传的封面需要验证上传者及用途。
+	var coverUpload Upload
 	if req.CoverURL != "/cover.svg" {
 		coverName, valid := strings.CutPrefix(req.CoverURL, "/media/covers/")
 		if !valid || coverName == "" || strings.ContainsAny(coverName, `/\?#%`) {
-			c.JSON(http.StatusBadRequest, map[string]string{
-				"error": "请使用默认封面或本站上传接口返回的封面地址",
-			})
+			c.JSON(http.StatusBadRequest, map[string]string{"error": "请使用默认封面或本站上传接口返回的封面地址"})
 			return
 		}
-		err = tx.QueryRowContext(ctx,
-			`SELECT id, status FROM uploads
-	 WHERE saved_name = ? AND user_id = ? AND file_type = ?
-	 FOR UPDATE`,
-			coverName, authorID, "cover",
-		).Scan(&coverUploadID, &coverStatus)
-		if errors.Is(err, sql.ErrNoRows) {
-			c.JSON(http.StatusForbidden, map[string]string{
-				"error": "封面不存在、不属于当前用户或文件类型不正确",
-			})
+		err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").Where("saved_name = ? AND user_id = ? AND file_type = ?", coverName, authorID, "cover").Take(&coverUpload).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusForbidden, map[string]string{"error": "封面不存在、不属于当前用户或文件类型不正确"})
 			return
 		}
 		if err != nil {
 			log.Printf("查询封面归属失败: %v", err)
-			c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "检查封面归属失败",
-			})
+			c.JSON(http.StatusInternalServerError, map[string]string{"error": "检查封面归属失败"})
 			return
 		}
-		if coverStatus != "pending" && coverStatus != "published" {
-			c.JSON(http.StatusConflict, map[string]string{
-				"error": "封面文件正在清理或不可使用，请重新上传",
-			})
+		if coverUpload.Status != "pending" && coverUpload.Status != "published" {
+			c.JSON(http.StatusConflict, map[string]string{"error": "封面文件正在清理或不可使用，请重新上传"})
 			return
 		}
 	}
-
-	// 4、保存视频元数据
-	result, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO videos (author_id, title,play_url, cover_url) VALUES (?, ?, ?, ?)`, authorID, req.Title, req.PlayURL, req.CoverURL)
-	if err != nil {
+	item := Video{AuthorID: authorID, Title: req.Title, PlayURL: req.PlayURL, CoverURL: req.CoverURL}
+	if err := tx.Create(&item).Error; err != nil {
 		log.Printf("保存视频失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "保存视频失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "保存视频失败"})
 		return
 	}
-	//5、取得自增 ID
-	id, err := result.LastInsertId()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "获取视频ID失败",
-		})
-		return
+	ids := []uint64{videoUpload.ID}
+	if coverUpload.ID != 0 {
+		ids = append(ids, coverUpload.ID)
 	}
-	_, err = tx.ExecContext(ctx,
-		`UPDATE uploads SET status = 'published' WHERE id = ?`,
-		videoUploadID,
-	)
-	if err != nil {
-		log.Printf("更新视频上传状态失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "发布视频失败",
-		})
-		return
-	}
-
-	if coverUploadID != 0 {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE uploads SET status = 'published' WHERE id = ?`,
-			coverUploadID,
-		)
-		if err != nil {
-			log.Printf("更新封面上传状态失败: %v", err)
-			c.JSON(http.StatusInternalServerError, map[string]string{
-				"error": "发布视频失败",
-			})
+	for _, id := range ids {
+		if err := tx.Model(&Upload{}).Where("id = ?", id).Update("status", "published").Error; err != nil {
+			log.Printf("更新上传状态失败: %v", err)
+			c.JSON(http.StatusInternalServerError, map[string]string{"error": "发布视频失败"})
 			return
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit().Error; err != nil {
 		log.Printf("提交发布事务失败: %v", err)
-		c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "发布视频失败",
-		})
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "发布视频失败"})
 		return
 	}
-
-	c.JSON(http.StatusCreated, map[string]interface{}{
-		"id":        id,
-		"author_id": authorID,
-		"title":     req.Title,
-	})
+	c.JSON(http.StatusCreated, map[string]interface{}{"id": item.ID, "author_id": authorID, "title": req.Title})
 }
 
 // 负责传视频文件
-func (h *Handler) Upload(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) Upload(c *gin.Context) {
+	ctx := c.Request.Context()
 	//验证上传用户身份
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -453,6 +313,11 @@ func (h *Handler) Upload(ctx context.Context, c *app.RequestContext) {
 	}
 	file, err := c.FormFile("file")
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "请求体过大"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "请通过file 字段上传文件",
 		})
@@ -523,11 +388,8 @@ func (h *Handler) Upload(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	// 视频保存成功，写入上传记录
-	_, err = h.DB.ExecContext(
-		ctx,
-		`INSERT INTO uploads (user_id, saved_name, file_type) VALUES (?, ?, ?)`,
-		userID, savedName, "video",
-	)
+	record := Upload{UserID: userID, SavedName: savedName, FileType: "video"}
+	err = h.DB.WithContext(ctx).Select("UserID", "SavedName", "FileType").Create(&record).Error
 	if err != nil {
 		log.Printf("保存上传记录失败: %v", err)
 		//数据库写入失败，尝试清除本次刚保存的视频

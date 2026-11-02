@@ -37,7 +37,7 @@ func NewCommentService(repository CommentRepository) *CommentService {
 
 // Service 处理业务规则，并通过 repository 接口访问数据。
 // 当前列表查询没有额外业务规则，因此直接返回查询结果。
-// CreateComment receives ordinary Go values, without depending on HTTP or Hertz.
+// CreateComment receives ordinary Go values, without depending on HTTP or Gin.
 func (s *CommentService) CreateComment(ctx context.Context, userID, videoID uint64, content string) (CreatedComment, error) {
 	content = strings.TrimSpace(content)
 	length := utf8.RuneCountInString(content)

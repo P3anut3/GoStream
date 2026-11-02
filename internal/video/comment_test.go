@@ -6,13 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"gostream/internal/database"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	ut "gostream/internal/testutil"
 )
 
 func TestCreateCommentValidation(t *testing.T) {
@@ -25,8 +26,8 @@ func TestCreateCommentValidation(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New()
-	handler := &Handler{DB: db, CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
+	h := gin.New()
+	handler := &Handler{DB: database.WrapSQL(db), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)})}
 	h.POST("/videos/:id/comments", auth.JWTAuth(secret), handler.CreateComment)
 	for _, tc := range []struct {
 		name, id, token, body string
@@ -49,7 +50,7 @@ func TestCreateCommentValidation(t *testing.T) {
 			if tc.token != "" {
 				headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + tc.token})
 			}
-			resp := ut.PerformRequest(h.Engine, http.MethodPost, "/videos/"+tc.id+"/comments",
+			resp := ut.PerformRequest(h, http.MethodPost, "/videos/"+tc.id+"/comments",
 				&ut.Body{Body: bytes.NewBufferString(tc.body), Len: len(tc.body)}, headers...).Result()
 			if resp.StatusCode() != tc.want {
 				t.Errorf("expected %d, got %d", tc.want, resp.StatusCode())
@@ -72,8 +73,8 @@ func TestListCommentsValidation(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New()
-	handler := &Handler{DB: db, CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
+	h := gin.New()
+	handler := &Handler{DB: database.WrapSQL(db), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)})}
 	h.GET("/videos/:id/comments", handler.ListComments)
 	for _, tc := range []struct {
 		name, path string
@@ -91,7 +92,7 @@ func TestListCommentsValidation(t *testing.T) {
 		{"database_failure", "/videos/1/comments", 500},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			resp := ut.PerformRequest(h.Engine, http.MethodGet, tc.path, nil).Result()
+			resp := ut.PerformRequest(h, http.MethodGet, tc.path, nil).Result()
 			if resp.StatusCode() != tc.want {
 				t.Errorf("expected %d, got %d", tc.want, resp.StatusCode())
 			}
@@ -144,10 +145,10 @@ func TestListCommentsServiceResponse(t *testing.T) {
 				}
 				return tc.comments, tc.err
 			})
-			h := server.New()
+			h := gin.New()
 			handler := &Handler{CommentService: NewCommentService(repo)}
 			h.GET("/videos/:id/comments", handler.ListComments)
-			resp := ut.PerformRequest(h.Engine, http.MethodGet, "/videos/34/comments?page=3&page_size=5", nil).Result()
+			resp := ut.PerformRequest(h, http.MethodGet, "/videos/34/comments?page=3&page_size=5", nil).Result()
 			if resp.StatusCode() != tc.wantStatus {
 				t.Fatalf("expected %d, got %d", tc.wantStatus, resp.StatusCode())
 			}
@@ -200,8 +201,8 @@ func TestDeleteCommentValidation(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	h := server.New()
-	handler := &Handler{DB: db, CommentService: NewCommentService(&SQLCommentRepository{DB: db})}
+	h := gin.New()
+	handler := &Handler{DB: database.WrapSQL(db), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)})}
 	h.DELETE("/comments/:id", auth.JWTAuth(secret), handler.DeleteComment)
 	for _, tc := range []struct {
 		name, id, token string
@@ -219,7 +220,7 @@ func TestDeleteCommentValidation(t *testing.T) {
 			if tc.token != "" {
 				headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + tc.token})
 			}
-			resp := ut.PerformRequest(h.Engine, http.MethodDelete, "/comments/"+tc.id, nil, headers...).Result()
+			resp := ut.PerformRequest(h, http.MethodDelete, "/comments/"+tc.id, nil, headers...).Result()
 			if resp.StatusCode() != tc.want {
 				t.Errorf("expected %d, got %d", tc.want, resp.StatusCode())
 			}
@@ -260,9 +261,9 @@ func TestDeleteCommentServiceResponse(t *testing.T) {
 				return tc.deleted, nil
 			})
 			handler := &Handler{CommentService: NewCommentService(repository)}
-			h := server.New()
+			h := gin.New()
 			h.DELETE("/comments/:id", auth.JWTAuth(secret), handler.DeleteComment)
-			resp := ut.PerformRequest(h.Engine, http.MethodDelete, "/comments/456", nil,
+			resp := ut.PerformRequest(h, http.MethodDelete, "/comments/456", nil,
 				ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantStatus {
 				t.Fatalf("expected %d, got %d", tc.wantStatus, resp.StatusCode())

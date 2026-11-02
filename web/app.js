@@ -5,22 +5,29 @@ const $ = (id) => document.getElementById(id);
 const state = { token: "", user: null, scope: "all", page: 1, size: 6, videos: [], mode: "login", source: "file", file: null, uploaded: null, coverFile: null, uploadedCover: null, coverPreview: "", detail: null, preview: "", busy: false, listSequence: 0, detailSequence: 0, likeStatus: null, likeLoading: false, likeBusy: false, likeSequence: 0, commentPage: 1, commentSize: 5, comments: [], commentLoading: false, commentBusy: false, commentHasNext: false, commentError: "", commentSequence: 0, commentMutation: 0, commentDeleteTarget: null };
 let toastTimer;
 let pendingMine = false;
+// 公共 Feed 的游标与“我的视频”的页码分开管理。
+Object.assign(state, { nextCursor: "", feedHasMore: false, listLoading: false, listError: "", cursorInvalid: false });
 function notify(message) { $("toast").textContent = message; $("toast").hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => { $("toast").hidden = true; }, 4500); }
 function mediaURL(value) { if (!value) return ""; try { const u = new URL(value, location.origin); return ["http:", "https:"].includes(u.protocol) ? u.href : ""; } catch { return ""; } }
 function formatDate(value) { const d = new Date(value); return Number.isNaN(d.valueOf()) ? "时间未知" : d.toLocaleDateString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }); }
-function session(token = "", user = null) { const changed = state.token !== token; if (changed) { state.uploaded = null; state.uploadedCover = null; } state.token = token; state.user = user; $("account-name").textContent = user ? user.username : "访客模式"; $("auth-button").textContent = user ? "账户信息" : "登录 / 注册"; $("logout-button").hidden = !user; $("delete-button").hidden = !user || !state.detail || String(state.detail.author_id) !== String(user.id); if (changed) { syncCommentSession(); resetLikeState(); if (state.detail && $("detail-dialog").open) loadLikeStatus(); } if (changed && state.scope === "mine") { if (!token) state.scope = "all"; state.page = 1; updateScope(); loadVideos(); } }
-async function api(path, { method = "GET", body, auth = false, form = false } = {}) {
+function session(token = "", user = null) { const changed = state.token !== token; if (changed) { state.uploaded = null; state.uploadedCover = null; } state.token = token; state.user = user; $("account-name").textContent = user ? user.username : "访客模式"; $("auth-button").textContent = user ? "账户信息" : "登录 / 注册"; $("logout-button").hidden = !user; $("delete-button").hidden = !user || !state.detail || String(state.detail.author_id) !== String(user.id); if (changed) { syncCommentSession(); resetLikeState(); if (state.detail && $("detail-dialog").open) loadLikeStatus(); } if (changed) { if (!token && state.scope === "mine") state.scope = "all"; state.page = 1; state.videos = []; updateScope(); return loadVideos(); } }
+async function api(path, { method = "GET", body, auth = false, optionalAuth = false, form = false } = {}) {
   if (auth && !state.token) throw new Error("请先登录后再操作");
   const requestToken = state.token;
   const headers = {};
-  if (auth) headers.Authorization = "Bearer " + requestToken;
+  if (auth || (optionalAuth && requestToken)) headers.Authorization = "Bearer " + requestToken;
   if (body && !form) headers["Content-Type"] = "application/json";
   let response;
   try { response = await fetch(path, { method, headers, body: body ? (form ? body : JSON.stringify(body)) : undefined }); }
   catch { throw new Error("无法连接服务，请检查网络并确认 GoStream 正在运行"); }
   const text = await response.text(); let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { if (response.ok) throw new Error("服务器响应格式异常"); }
-  if (!response.ok) { if (response.status === 401 && auth && state.token === requestToken) { session(); notify("登录状态已失效，请重新登录"); } throw new Error(data?.error || (response.status === 413 ? (path === "/uploads/covers" ? "封面或请求过大，请选择不超过 5 MiB 的图片" : "文件或请求过大，请选择不超过 100 MiB 的视频") : "请求失败（" + response.status + "）")); }
+  if (!response.ok) {
+    if (response.status === 401 && (auth || optionalAuth) && requestToken && state.token === requestToken) { session(); notify("登录状态已失效，请重新登录"); }
+    const error = new Error(data?.error || (response.status === 413 ? (path === "/uploads/covers" ? "封面或请求过大，请选择不超过 5 MiB 的图片" : "文件或请求过大，请选择不超过 100 MiB 的视频") : "请求失败（" + response.status + "）"));
+    error.code = data?.code; error.status = response.status;
+    throw error;
+  }
   return data;
 }
 function openAuth(mode = "login") { state.mode = mode; $("auth-title").textContent = mode === "login" ? "欢迎回来" : "创建你的账号"; $("auth-description").textContent = mode === "login" ? "登录后，发布属于你的视频。" : "从你的第一个视频开始。"; $("tab-login").classList.toggle("selected", mode === "login"); $("tab-register").classList.toggle("selected", mode === "register"); $("password").autocomplete = mode === "login" ? "current-password" : "new-password"; $("auth-submit").textContent = mode === "login" ? "登录" : "创建账号"; $("auth-error").textContent = ""; if (!$("auth-dialog").open) $("auth-dialog").showModal(); }
@@ -49,7 +56,7 @@ function updateScope() {
 }
 function selectScope(scope) {
   if (scope === "mine" && !state.token) { pendingMine = true; openAuth(); notify("登录后即可查看我的视频"); return; }
-  pendingMine = false; state.scope = scope; state.page = 1; updateScope(); loadVideos();
+  pendingMine = false; state.scope = scope; state.page = 1; state.videos = []; updateScope(); return loadVideos();
 }
 $("nav-library").onclick = () => selectScope("all");
 $("nav-mine").onclick = () => selectScope("mine");
@@ -68,16 +75,65 @@ function card(video) {
   const meta = document.createElement("div"); meta.className = "card-meta";
   const author = document.createElement("span"); author.className = "author-tag";
   const avatar = document.createElement("span"); avatar.className = "mini-avatar"; avatar.textContent = String(video.author_id).slice(-2);
-  const authorName = document.createElement("span"); authorName.textContent = "创作者 " + video.author_id;
-  const date = document.createElement("time"); date.textContent = formatDate(video.created_at); author.append(avatar, authorName); meta.append(author, date); content.append(title, meta); article.append(preview, content); return article;
+  const authorName = document.createElement("span"); authorName.textContent = video.author_name || "创作者 " + video.author_id;
+  const date = document.createElement("time"); date.textContent = formatDate(video.created_at); author.append(avatar, authorName); meta.append(author, date);
+  if (Number.isSafeInteger(video.like_count) && video.like_count >= 0) {
+    const likes = document.createElement("span"); likes.textContent = (video.liked ? "♥ " : "♡ ") + video.like_count + (video.liked ? " · 已点赞" : " 人点赞");
+    likes.setAttribute("aria-label", likes.textContent); content.append(title, meta, likes);
+  } else { content.append(title, meta); }
+  article.append(preview, content); return article;
 }
-async function loadVideos() {
-  const sequence = ++state.listSequence; $("list-message").textContent = "正在整理你的片段……"; $("video-grid").replaceChildren(); $("refresh-button").disabled = true; $("prev-page").disabled = true; $("next-page").disabled = true;
-  try { const mine = state.scope === "mine"; const data = await api((mine ? "/me/videos" : "/videos") + "?page=" + state.page + "&page_size=" + state.size, { auth: mine }); if (sequence !== state.listSequence) return; state.videos = Array.isArray(data.videos) ? data.videos : []; $("video-grid").replaceChildren(...state.videos.map(card)); $("list-message").textContent = state.videos.length ? "" : (state.page === 1 ? (state.scope === "mine" ? "你还没有发布视频。发布你的第一个片段吧。" : "这里还没有视频。发布你的第一个片段吧。") : "这一页还没有视频，试试返回上一页。"); $("page-count").textContent = "本页 " + state.videos.length + " 条"; $("page-number").textContent = String(state.page).padStart(2, "0"); $("page-description").textContent = "第 " + state.page + " 页 · " + (state.scope === "mine" ? "我的作品" : "发现每一个片段"); $("prev-page").disabled = state.page <= 1; $("next-page").disabled = state.videos.length < state.size || state.page >= 10000; }
-  catch (error) { if (sequence === state.listSequence) { $("list-message").textContent = error.message + "，可点击刷新重试。"; $("page-count").textContent = "暂不可用"; $("prev-page").disabled = state.page <= 1; } }
-  finally { if (sequence === state.listSequence) $("refresh-button").disabled = false; }
+function renderVideoList() {
+  const mine = state.scope === "mine";
+  $("video-grid").replaceChildren(...state.videos.map(card));
+  $("page-count").textContent = (mine ? "本页 " : "已加载 ") + state.videos.length + " 条";
+  $("list-message").textContent = state.listError || (state.listLoading ? "正在加载视频……" : state.videos.length ? "" : mine ? "这一页暂无作品，可发布视频或返回上一页。" : "这里还没有视频。发布你的第一个片段吧。");
+  $("page-description").textContent = mine ? "第 " + state.page + " 页 · 我的作品" : "最新视频 · 刷新获取新作品";
+  $("page-size-label").textContent = mine ? "每页 " : "每批 ";
+  for (const id of ["prev-page", "next-page", "page-number"]) $(id).hidden = !mine;
+  $("page-number").textContent = String(state.page).padStart(2, "0");
+  $("prev-page").disabled = state.listLoading || state.page <= 1;
+  $("next-page").disabled = state.listLoading || Boolean(state.listError) || state.videos.length < state.size || state.page >= 10000;
+  $("load-more").hidden = mine;
+  $("load-more").disabled = state.listLoading || !state.feedHasMore || state.cursorInvalid;
+  $("load-more").textContent = state.listLoading ? "正在加载……" : state.cursorInvalid ? "请刷新列表" : state.feedHasMore ? (state.listError ? "重试加载更多" : "加载更多") : "没有更多视频了";
+  $("video-grid").setAttribute("aria-busy", String(state.listLoading));
 }
-$("refresh-button").onclick = loadVideos; $("prev-page").onclick = () => { if (state.page > 1) { state.page--; loadVideos(); } }; $("next-page").onclick = () => { state.page++; loadVideos(); }; $("page-size").onchange = () => { state.size = Number($("page-size").value); state.page = 1; loadVideos(); }; $("lookup-form").onsubmit = (e) => { e.preventDefault(); showDetail($("lookup-id").value); };
+async function loadVideos({ append = false } = {}) {
+  const mine = state.scope === "mine";
+  if (append && (mine || state.listLoading || !state.feedHasMore || state.cursorInvalid)) return;
+  const sequence = ++state.listSequence, scope = state.scope, token = state.token;
+  const page = state.page, size = state.size, cursor = append ? state.nextCursor : "";
+  const current = () => sequence === state.listSequence && scope === state.scope && token === state.token;
+  state.listLoading = true; state.listError = "";
+  if (!append) { state.nextCursor = ""; state.feedHasMore = false; state.cursorInvalid = false; }
+  if (mine) state.videos = [];
+  renderVideoList();
+  try {
+    const path = mine ? "/me/videos?page=" + page + "&page_size=" + size : "/feed?limit=" + size + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+    const data = await api(path, { auth: mine, optionalAuth: !mine });
+    if (!current()) return;
+    if (!Array.isArray(data?.videos)) throw new Error("视频列表响应格式异常");
+    if (!mine && (typeof data.next_cursor !== "string" || typeof data.has_more !== "boolean" || data.has_more !== Boolean(data.next_cursor) || (append && data.has_more && data.next_cursor === cursor))) throw new Error("视频流分页信息异常，请刷新列表");
+    // 追加时按 ID 去重；游标仍使用服务端返回值，不根据前端条数自行推测。
+    const items = append ? [...state.videos, ...data.videos] : data.videos;
+    const seen = new Set();
+    state.videos = items.filter((item) => { const id = String(item.id); if (seen.has(id)) return false; seen.add(id); return true; });
+    if (!mine) { state.nextCursor = data.next_cursor; state.feedHasMore = data.has_more; }
+  } catch (error) {
+    if (!current()) return;
+    state.cursorInvalid = error.code === "INVALID_CURSOR";
+    state.listError = error.message + (state.cursorInvalid ? "，请点击刷新重新加载。" : append ? "，已有视频已保留，可重试加载更多。" : "，可点击刷新重试。");
+  } finally {
+    if (current()) { state.listLoading = false; renderVideoList(); }
+  }
+}
+$("refresh-button").onclick = () => loadVideos();
+$("load-more").onclick = () => loadVideos({ append: true });
+$("prev-page").onclick = () => { if (state.scope === "mine" && !state.listLoading && state.page > 1) { state.page--; return loadVideos(); } };
+$("next-page").onclick = () => { if (state.scope === "mine" && !state.listLoading && !$("next-page").disabled) { state.page++; return loadVideos(); } };
+$("page-size").onchange = () => { state.size = Number($("page-size").value); state.page = 1; return loadVideos(); };
+$("lookup-form").onsubmit = (e) => { e.preventDefault(); showDetail($("lookup-id").value); };
 async function showDetail(id) {
   const sequence = ++state.detailSequence;
   state.detail = null; resetLikeState(); resetComments();
@@ -122,6 +178,10 @@ async function loadLikeStatus() {
     if (!sameLikeTarget(id, token, sequence)) return;
     if (!Number.isSafeInteger(status?.like_count) || status.like_count < 0 || typeof status.liked !== "boolean") throw new Error("点赞状态响应格式异常");
     state.likeStatus = status;
+    for (const item of state.videos) {
+      if (String(item.id) === String(id) && typeof item.like_count === "number") { item.like_count = status.like_count; item.liked = status.liked; }
+    }
+    renderVideoList();
   } catch (error) {
     if (!sameLikeTarget(id, token, sequence)) return;
     state.likeStatus = null; $("like-message").textContent = error.message + "，可点击重试查询。";
@@ -355,7 +415,7 @@ $("publish-form").onsubmit = async (event) => {
     if (state.preview) URL.revokeObjectURL(state.preview);
     state.preview = ""; $("upload-preview").hidden = true; $("upload-preview").removeAttribute("src");
     $("file-label").textContent = "点击选择，或拖入视频文件";
-    state.page = 1; await loadVideos(); notify("视频已发布，去看看你的新片段吧");
+    state.scope = "all"; state.page = 1; state.videos = []; updateScope(); await loadVideos(); notify("视频已发布，去看看你的新片段吧");
   } catch (error) {
     const retained = [state.uploaded ? "视频" : "", state.uploadedCover ? "封面" : ""].filter(Boolean).join("和");
     $("publish-message").textContent = error.message + (retained ? "。已上传的" + retained + "会在本次登录中复用，可重试。" : "");

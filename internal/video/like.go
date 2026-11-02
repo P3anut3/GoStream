@@ -1,16 +1,16 @@
 package video
 
 import (
-	"context"
 	"errors"
 	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/gin-gonic/gin"
 )
 
-func (h *Handler) Like(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) Like(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、 获取当前登录用户
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -52,7 +52,8 @@ func (h *Handler) Like(ctx context.Context, c *app.RequestContext) {
 	c.Status(http.StatusNoContent)
 }
 
-func (h *Handler) UnLike(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) UnLike(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、获取当前登录用户
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -89,7 +90,8 @@ func (h *Handler) UnLike(ctx context.Context, c *app.RequestContext) {
 }
 
 // 查看点赞数
-func (h *Handler) GetLikeStatus(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) GetLikeStatus(c *gin.Context) {
+	ctx := c.Request.Context()
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
 	if !exists || userID == 0 || !ok {

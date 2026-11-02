@@ -8,18 +8,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"gostream/internal/database"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
-	"time"
 
 	"gostream/internal/auth"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
+	"gostream/internal/httpx"
+	ut "gostream/internal/testutil"
 )
 
 func TestUpload(t *testing.T) {
@@ -58,20 +59,13 @@ func TestUpload(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			h := server.New()
+			h := gin.New()
 			store := &uploadTestStore{dir: dir, fail: tc.name == "database_failure"}
 			db := sql.OpenDB(store)
 			t.Cleanup(func() { db.Close() })
-			handler := &Handler{DB: db, UploadDir: dir}
+			handler := &Handler{DB: database.WrapSQL(db), UploadDir: dir}
 			h.POST("/uploads/videos", auth.JWTAuth(secret), handler.Upload)
-			h.StaticFS("/media/videos", &app.FS{
-				Root:               handler.UploadDir,
-				PathRewrite:        app.NewPathSlashesStripper(2),
-				GenerateIndexPages: false,
-				AcceptByteRange:    true,
-				// Release cached file handles promptly so Windows can clean TempDir.
-				CacheDuration: time.Millisecond,
-			})
+			httpx.RegisterMedia(h, "/media/videos", dir)
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
 			if tc.field != "" {
@@ -90,7 +84,7 @@ func TestUpload(t *testing.T) {
 			if tc.token != "" {
 				headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + tc.token})
 			}
-			resp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/videos",
+			resp := ut.PerformRequest(h, http.MethodPost, "/uploads/videos",
 				&ut.Body{Body: bytes.NewReader(body.Bytes()), Len: body.Len()}, headers...).Result()
 			if resp.StatusCode() != tc.want {
 				t.Fatalf("expected status %d, got %d: %s", tc.want, resp.StatusCode(), resp.Body())
@@ -128,7 +122,7 @@ func TestUpload(t *testing.T) {
 					t.Errorf("upload record must use JWT user ID and saved filename: got %d, %q", store.userID, store.savedName)
 				}
 				// The media endpoint is public: no Authorization header is supplied.
-				media := ut.PerformRequest(h.Engine, http.MethodGet, metadata.PlayURL, nil).Result()
+				media := ut.PerformRequest(h, http.MethodGet, metadata.PlayURL, nil).Result()
 				if media.StatusCode() != http.StatusOK {
 					t.Fatalf("media GET expected 200, got %d", media.StatusCode())
 				}
@@ -138,11 +132,11 @@ func TestUpload(t *testing.T) {
 				if got := string(media.Header.ContentType()); got != "video/mp4" {
 					t.Errorf("expected video/mp4 response content type, got %q", got)
 				}
-				head := ut.PerformRequest(h.Engine, http.MethodHead, metadata.PlayURL, nil).Result()
+				head := ut.PerformRequest(h, http.MethodHead, metadata.PlayURL, nil).Result()
 				if head.StatusCode() != http.StatusOK || len(head.Body()) != 0 {
 					t.Errorf("media HEAD expected 200 with no body, got status %d and %d bytes", head.StatusCode(), len(head.Body()))
 				}
-				partial := ut.PerformRequest(h.Engine, http.MethodGet, metadata.PlayURL, nil,
+				partial := ut.PerformRequest(h, http.MethodGet, metadata.PlayURL, nil,
 					ut.Header{Key: "Range", Value: "bytes=0-15"}).Result()
 				if partial.StatusCode() != http.StatusPartialContent || !bytes.Equal(partial.Body(), tc.content[:16]) {
 					t.Errorf("byte range request must return 206 and the requested bytes, got status %d", partial.StatusCode())
@@ -173,7 +167,7 @@ func TestUpload(t *testing.T) {
 			if store.calls != wantCalls {
 				t.Errorf("expected %d database writes, got %d", wantCalls, store.calls)
 			}
-			missing := ut.PerformRequest(h.Engine, http.MethodGet, "/media/videos/does-not-exist.mp4", nil).Result()
+			missing := ut.PerformRequest(h, http.MethodGet, "/media/videos/does-not-exist.mp4", nil).Result()
 			if missing.StatusCode() != http.StatusNotFound {
 				t.Errorf("missing media expected 404, got %d", missing.StatusCode())
 			}
@@ -214,7 +208,7 @@ func (*uploadTestConn) Begin() (driver.Tx, error) {
 func (c *uploadTestConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	s := c.store
 	s.calls++
-	if query != "INSERT INTO uploads (user_id, saved_name, file_type) VALUES (?, ?, ?)" || len(args) != 3 {
+	if strings.ReplaceAll(strings.ReplaceAll(query, "`", ""), " ", "") != "INSERTINTOuploads(user_id,saved_name,file_type)VALUES(?,?,?)" || len(args) != 3 {
 		return nil, errors.New("unexpected upload INSERT")
 	}
 	wantType := s.wantType
@@ -239,5 +233,5 @@ func (c *uploadTestConn) ExecContext(_ context.Context, query string, args []dri
 		return nil, errors.New("simulated database write failure")
 	}
 	s.userID, s.savedName = userID, name
-	return driver.RowsAffected(1), nil
+	return publishTransactionResult{}, nil
 }

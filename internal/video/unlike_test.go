@@ -6,13 +6,14 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"gostream/internal/database"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	ut "gostream/internal/testutil"
 )
 
 func TestSQLLikeRepositoryUnLikeVideo(t *testing.T) {
@@ -35,7 +36,7 @@ func TestSQLLikeRepositoryUnLikeVideo(t *testing.T) {
 				if got != ctx {
 					t.Error("request context must reach database")
 				}
-				if strings.Join(strings.Fields(query), " ") != "DELETE FROM video_likes WHERE user_id = ? AND video_id = ?" {
+				if strings.Join(strings.Fields(strings.ReplaceAll(query, "`", "")), " ") != "DELETE FROM video_likes WHERE user_id = ? AND video_id = ?" {
 					t.Errorf("unexpected DELETE: %s", query)
 				}
 				if len(args) != 2 || args[0].Value != int64(12) || args[1].Value != int64(34) {
@@ -44,7 +45,7 @@ func TestSQLLikeRepositoryUnLikeVideo(t *testing.T) {
 				return driver.RowsAffected(tc.affected), tc.err
 			}})
 			t.Cleanup(func() { db.Close() })
-			if err := (&SQLLikeRepository{DB: db}).UnLikeVideo(ctx, 12, 34); !errors.Is(err, tc.err) {
+			if err := (&SQLLikeRepository{DB: database.WrapSQL(db)}).UnLikeVideo(ctx, 12, 34); !errors.Is(err, tc.err) {
 				t.Fatalf("expected cause %v, got %v", tc.err, err)
 			}
 			if calls != 1 {
@@ -118,11 +119,11 @@ func TestUnLikeServiceHTTPResponse(t *testing.T) {
 				}
 				return tc.err
 			})
-			h := server.New()
+			h := gin.New()
 			handler := &Handler{LikeService: NewLikeService(repo)}
 			h.DELETE("/videos/:id/like", auth.JWTAuth(secret), handler.UnLike)
 			for i := 0; i < 2; i++ {
-				resp := ut.PerformRequest(h.Engine, http.MethodDelete, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
+				resp := ut.PerformRequest(h, http.MethodDelete, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 				if resp.StatusCode() != tc.want {
 					t.Fatalf("expected %d, got %d", tc.want, resp.StatusCode())
 				}

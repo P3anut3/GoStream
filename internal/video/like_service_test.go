@@ -10,8 +10,8 @@ import (
 
 	"gostream/internal/auth"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
+	ut "gostream/internal/testutil"
 )
 
 type likeRepositoryFunc func(context.Context, uint64, uint64) error
@@ -88,9 +88,9 @@ func TestLikeServiceHTTPResponse(t *testing.T) {
 				return tc.repositoryError
 			})
 			handler := &Handler{LikeService: NewLikeService(repo)}
-			h := server.New()
+			h := gin.New()
 			h.PUT("/videos/:id/like", auth.JWTAuth(secret), handler.Like)
-			resp := ut.PerformRequest(h.Engine, http.MethodPut, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
+			resp := ut.PerformRequest(h, http.MethodPut, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantStatus {
 				t.Fatalf("expected %d, got %d", tc.wantStatus, resp.StatusCode())
 			}

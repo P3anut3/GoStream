@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"gostream/internal/database"
 	"image"
 	"image/jpeg"
 	"image/png"
@@ -13,12 +14,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	"gostream/internal/httpx"
+	ut "gostream/internal/testutil"
 )
 
 func TestUploadCover(t *testing.T) {
@@ -72,13 +72,10 @@ func TestUploadCover(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			h := server.New()
-			handler := &Handler{DB: db, CoverDir: coverDir}
+			h := gin.New()
+			handler := &Handler{DB: database.WrapSQL(db), CoverDir: coverDir}
 			h.POST("/uploads/covers", auth.JWTAuth(secret), handler.UploadCover)
-			h.StaticFS("/media/covers", &app.FS{
-				Root: dir, PathRewrite: app.NewPathSlashesStripper(2),
-				GenerateIndexPages: false, CacheDuration: time.Millisecond,
-			})
+			httpx.RegisterMedia(h, "/media/covers", dir)
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)
 			if tc.field != "" {
@@ -97,7 +94,7 @@ func TestUploadCover(t *testing.T) {
 			if tc.token != "" {
 				headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + tc.token})
 			}
-			resp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/covers",
+			resp := ut.PerformRequest(h, http.MethodPost, "/uploads/covers",
 				&ut.Body{Body: bytes.NewReader(body.Bytes()), Len: body.Len()}, headers...).Result()
 			if resp.StatusCode() != tc.want {
 				t.Fatalf("expected %d, got %d: %s", tc.want, resp.StatusCode(), resp.Body())
@@ -136,7 +133,7 @@ func TestUploadCover(t *testing.T) {
 				if err != nil || !bytes.Equal(saved, tc.content) {
 					t.Fatal("saved bytes differ from upload")
 				}
-				media := ut.PerformRequest(h.Engine, http.MethodGet, result.CoverURL, nil).Result()
+				media := ut.PerformRequest(h, http.MethodGet, result.CoverURL, nil).Result()
 				if media.StatusCode() != 200 || !bytes.Equal(media.Body(), tc.content) {
 					t.Fatal("cover must be publicly readable with original bytes")
 				}

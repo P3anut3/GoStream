@@ -1,30 +1,28 @@
 package auth
 
 import (
-	"context"
 	"net/http"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
+	ut "gostream/internal/testutil"
 )
 
 func TestJWTAuthWithoutToken(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	h := server.New()
+	h := gin.New()
 
 	handlerCalled := false
 
 	h.GET("/me", JWTAuth(secret),
-		func(ctx context.Context, c *app.RequestContext) {
+		func(c *gin.Context) {
 			handlerCalled = true
 			c.Status(http.StatusOK)
 		},
 	)
 
 	// 模拟请求，没有携带 Authorization 请求头
-	recorder := ut.PerformRequest(h.Engine, http.MethodGet, "/me", nil)
+	recorder := ut.PerformRequest(h, http.MethodGet, "/me", nil)
 	response := recorder.Result()
 
 	if response.StatusCode() != http.StatusUnauthorized {
@@ -43,11 +41,11 @@ func TestJWTAuthWithValidToken(t *testing.T) {
 		t.Fatalf("生成 token 失败：%v", err)
 	}
 
-	h := server.New()
+	h := gin.New()
 	handlerCalled := false
 
 	h.GET("/me", JWTAuth(secret),
-		func(ctx context.Context, c *app.RequestContext) {
+		func(c *gin.Context) {
 			handlerCalled = true
 
 			value, exists := c.Get("userID")
@@ -66,7 +64,7 @@ func TestJWTAuthWithValidToken(t *testing.T) {
 	)
 
 	recorder := ut.PerformRequest(
-		h.Engine,
+		h,
 		http.MethodGet,
 		"/me",
 		nil,

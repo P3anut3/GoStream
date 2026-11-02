@@ -1,91 +1,114 @@
 package main
 
 import (
-	"gostream/internal/video"
+	"context"
+	"errors"
+	"gostream/internal/config"
+	"gostream/internal/health"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"gostream/internal/auth"
 	"gostream/internal/database"
+	"gostream/internal/feed"
+	"gostream/internal/httpx"
 	"gostream/internal/user"
+	"gostream/internal/video"
 
-	"github.com/cloudwego/hertz/pkg/app"
-	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"gorm.io/gorm"
 )
 
-/*
-main.go：注册路由，指定请求交给谁处理
-*/
 func main() {
-	if err := godotenv.Load(); err != nil {
-		log.Fatal("加载 .env 失败，请检查文件是否存在")
+	// 本地可以使用 .env；没有这个文件时，允许使用进程环境变量
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Fatal("加载 .env 失败")
 	}
-	jwtSecret := os.Getenv("JWT_SECRET")
-	if len(jwtSecret) < 32 {
-		log.Fatal("请在 .env 中配置至少 32 字节的随机 JWT_SECRET")
-	}
-
-	dsn := os.Getenv("GOSTREAM_DSN")
-	if dsn == "" {
-		log.Fatal("请设置 GOSTREAM_DSN 环境变量")
-	}
-	db, err := database.OpenDB(dsn)
+	// 使用 目前实际保存的 YAML路径
+	cfg, err := config.Load("internal/config/config.yaml")
 	if err != nil {
-		log.Fatalf("连接数据库失败:%v ", err)
+		log.Fatal(err)
 	}
-	log.Println("数据库连接成功")
-	defer db.Close()
+	secret := []byte(cfg.Auth.JWTSecret)
 
-	h := server.Default(
-		server.WithHostPorts("127.0.0.1:8080"),
-		server.WithMaxRequestBodySize(101*1024*1024), // 限制请求体大小上限
-	)
-	userHandler := &user.UserHandler{DB: db, JWTSecret: []byte(jwtSecret)}
-	commentRepository := &video.SQLCommentRepository{DB: db}
-	commentService := video.NewCommentService(commentRepository)
-	likeRepository := &video.SQLLikeRepository{DB: db}
-	likeService := video.NewLikeService(likeRepository)
-	videoHandler := &video.Handler{
-		DB:             db,
-		UploadDir:      "uploads/videos",
-		CoverDir:       "uploads/covers",
-		CommentService: commentService,
-		LikeService:    likeService,
+	feedCursor, err := feed.NewCursorCodec([]byte(cfg.Auth.FeedCursorSecret))
+	if err != nil {
+		log.Fatal("初始化 Feed 游标失败")
 	}
-	h.POST("/users", userHandler.CreateUser)
-	h.POST("/login", userHandler.Login)
-	h.GET("/me", auth.JWTAuth(userHandler.JWTSecret), userHandler.Me)
+	db, err := database.OpenGORM(cfg.Database.DSN)
+	if err != nil {
+		log.Fatal("连接数据库失败，请检查配置和 MySQL 服务")
+	}
+	pool, _ := db.DB()
+	defer pool.Close()
+	router := newRouter(db, secret, feedCursor, cfg.Storage)
+	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	failed := make(chan error, 1)
+	go func() { failed <- server.ListenAndServe() }()
+	log.Printf("GoStream Gin HTTP 服务监听 %s", cfg.HTTP.Addr)
+	select {
+	case err := <-failed:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("HTTP 服务停止: %v", err)
+		}
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdown); err != nil {
+			log.Printf("关闭 HTTP 服务失败: %v", err)
+			server.Close()
+		}
+	}
+}
 
-	h.POST("/videos", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Publish)
-	h.GET("/videos", videoHandler.List)
-	h.GET("/videos/:id", videoHandler.GetByID)
-	h.DELETE("/videos/:id", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Delete)
-	h.POST("/uploads/videos", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Upload)
-	h.POST("/uploads/covers", auth.JWTAuth(userHandler.JWTSecret), videoHandler.UploadCover)
+func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig) *gin.Engine {
+	router := gin.Default()
+	router.SetTrustedProxies(nil)
+	router.MaxMultipartMemory = 8 * 1024 * 1024
+	router.Use(httpx.BodyLimit(101 * 1024 * 1024))
 
-	h.StaticFile("/", "./web/index.html")
-	h.StaticFile("/app.js", "./web/app.js")
-	h.StaticFile("/style.css", "./web/style.css")
-	h.StaticFile("/cover.svg", "./web/cover.svg")
-	h.StaticFS("/media/videos", &app.FS{ //静态文件访问路由 会使用 Hertz 提供的文件处理功能，注册 GET、HEAD 路由。你不需要自己写“打开文件、读取内容、返回响应”的处理函数。
-		Root:               videoHandler.UploadDir,        // 从哪个磁盘目录读文件
-		PathRewrite:        app.NewPathSlashesStripper(2), //查找文件前，怎样转换请求路径。这里2表示去掉路径中的前面两个部分也就是/media/videos/abc.mp4 里面的 media和 videos，最终结合root去找真实数据
-		GenerateIndexPages: false,                         //是否自动展示目录文件列表。
-		AcceptByteRange:    true,                          //是否支持读取文件一部分
-	})
-	h.GET("/me/videos", auth.JWTAuth(userHandler.JWTSecret), videoHandler.ListMine) //查看视频列表
-	h.StaticFS("/media/covers", &app.FS{
-		Root:               videoHandler.CoverDir,
-		PathRewrite:        app.NewPathSlashesStripper(2),
-		GenerateIndexPages: false,
-	})
-	h.PUT("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.Like)               // 点赞
-	h.GET("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.GetLikeStatus)      // 查看视频点赞数
-	h.DELETE("/videos/:id/like", auth.JWTAuth(userHandler.JWTSecret), videoHandler.UnLike)          // 取消点赞
-	h.POST("/videos/:id/comments", auth.JWTAuth(userHandler.JWTSecret), videoHandler.CreateComment) // 添加评论
-	h.GET("/videos/:id/comments", videoHandler.ListComments)
-	h.DELETE("/comments/:id", auth.JWTAuth(userHandler.JWTSecret), videoHandler.DeleteComment)
-
-	h.Spin()
+	userRepository := &user.GORMRepository{DB: db}
+	userService := user.NewUserService(userRepository)
+	users := &user.UserHandler{
+		JWTSecret: secret,
+		Service:   userService,
+	}
+	videos := &video.Handler{DB: db, UploadDir: storage.VideoDir, CoverDir: storage.CoverDir,
+		CommentService: video.NewCommentService(&video.SQLCommentRepository{DB: db}),
+		LikeService:    video.NewLikeService(&video.SQLLikeRepository{DB: db}),
+	}
+	feedRepository := &feed.GORMRepository{DB: db}
+	feedService := feed.NewService(feedRepository, feedCursor)
+	feedHandler := feed.NewHandler(feedService)
+	jwt := auth.JWTAuth(secret)
+	router.GET("/healthz", health.Live)
+	router.GET("/readyz", health.Ready(db))
+	router.GET("/feed", auth.OptionalJWTAuth(secret), feedHandler.ListLatest)
+	router.POST("/users", users.CreateUser)
+	router.POST("/login", users.Login)
+	router.GET("/me", jwt, users.Me)
+	router.POST("/videos", jwt, videos.Publish)
+	router.GET("/videos", videos.List)
+	router.GET("/videos/:id", videos.GetByID)
+	router.GET("/me/videos", jwt, videos.ListMine)
+	router.DELETE("/videos/:id", jwt, videos.Delete)
+	router.POST("/uploads/videos", jwt, videos.Upload)
+	router.POST("/uploads/covers", jwt, videos.UploadCover)
+	router.PUT("/videos/:id/like", jwt, videos.Like)
+	router.GET("/videos/:id/like", jwt, videos.GetLikeStatus)
+	router.DELETE("/videos/:id/like", jwt, videos.UnLike)
+	router.POST("/videos/:id/comments", jwt, videos.CreateComment)
+	router.GET("/videos/:id/comments", videos.ListComments)
+	router.DELETE("/comments/:id", jwt, videos.DeleteComment)
+	httpx.RegisterWeb(router, "web/dist")
+	httpx.RegisterMedia(router, "/media/videos", videos.UploadDir)
+	httpx.RegisterMedia(router, "/media/covers", videos.CoverDir)
+	return router
 }

@@ -18,9 +18,9 @@ import (
 	"gostream/internal/database"
 	"gostream/internal/user"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	ut "gostream/internal/testutil"
 )
 
 // TestDeleteIntegration uses the configured MySQL database only when explicitly enabled.
@@ -47,10 +47,11 @@ func TestDeleteIntegration(t *testing.T) {
 		t.Fatal("cannot generate fixture identifier")
 	}
 	prefix := "deltest_" + hex.EncodeToString(random[:])
-	h := server.New()
-	users := &user.UserHandler{DB: db, JWTSecret: secret}
+	h := gin.New()
+	userDB := database.WrapSQL(db)
+	users := &user.UserHandler{JWTSecret: secret, Service: user.NewUserService(&user.GORMRepository{DB: userDB})}
 	uploadDir := t.TempDir()
-	videos := &Handler{DB: db, UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: db}), LikeService: NewLikeService(&SQLLikeRepository{DB: db})}
+	videos := &Handler{DB: database.WrapSQL(db), UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)}), LikeService: NewLikeService(&SQLLikeRepository{DB: database.WrapSQL(db)})}
 	h.POST("/users", users.CreateUser)
 	h.POST("/login", users.Login)
 	h.POST("/videos", auth.JWTAuth(secret), videos.Publish)
@@ -82,7 +83,7 @@ func TestDeleteIntegration(t *testing.T) {
 		if token != "" {
 			headers = append(headers, ut.Header{Key: "Authorization", Value: "Bearer " + token})
 		}
-		resp := ut.PerformRequest(h.Engine, method, path, body, headers...).Result()
+		resp := ut.PerformRequest(h, method, path, body, headers...).Result()
 		return resp.StatusCode(), append([]byte(nil), resp.Body()...)
 	}
 	createAccount := func(suffix string) (uint64, string) {
@@ -152,7 +153,7 @@ func TestDeleteIntegration(t *testing.T) {
 		if err := writer.Close(); err != nil {
 			t.Fatal(err)
 		}
-		resp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/covers",
+		resp := ut.PerformRequest(h, http.MethodPost, "/uploads/covers",
 			&ut.Body{Body: bytes.NewReader(body.Bytes()), Len: body.Len()},
 			ut.Header{Key: "Content-Type", Value: writer.FormDataContentType()},
 			ut.Header{Key: "Authorization", Value: "Bearer " + ownerToken}).Result()
@@ -207,7 +208,7 @@ func TestDeleteIntegration(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	resp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/videos",
+	resp := ut.PerformRequest(h, http.MethodPost, "/uploads/videos",
 		&ut.Body{Body: bytes.NewReader(multipartBody.Bytes()), Len: multipartBody.Len()},
 		ut.Header{Key: "Content-Type", Value: writer.FormDataContentType()},
 		ut.Header{Key: "Authorization", Value: "Bearer " + ownerToken}).Result()
@@ -356,7 +357,7 @@ func TestDeleteIntegration(t *testing.T) {
 	path := "/videos/" + strconv.FormatUint(published.ID, 10)
 	testCreateComments(t, db, request, published.ID, ownerID, otherID, ownerToken, otherToken)
 	// Each account owns a separate uploaded video, so filtering is observable.
-	otherResp := ut.PerformRequest(h.Engine, http.MethodPost, "/uploads/videos",
+	otherResp := ut.PerformRequest(h, http.MethodPost, "/uploads/videos",
 		&ut.Body{Body: bytes.NewReader(multipartBody.Bytes()), Len: multipartBody.Len()},
 		ut.Header{Key: "Content-Type", Value: writer.FormDataContentType()},
 		ut.Header{Key: "Authorization", Value: "Bearer " + otherToken}).Result()

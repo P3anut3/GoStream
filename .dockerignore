@@ -1,0 +1,23 @@
+.git
+.idea
+.vscode
+
+# Runtime credentials are injected when starting containers.
+.env
+.env.*
+**/.env
+**/.env.*
+
+# Local media, documentation and frontend dependency installs.
+uploads
+docs
+node_modules
+**/node_modules
+web/dist
+frontend/test-results
+frontend/playwright-report
+
+# Local build output and logs.
+*.exe
+*.test
+*.log

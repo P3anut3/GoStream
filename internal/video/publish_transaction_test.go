@@ -7,14 +7,15 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"gostream/internal/database"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	ut "gostream/internal/testutil"
 )
 
 func TestPublishTransaction(t *testing.T) {
@@ -43,8 +44,8 @@ func TestPublishTransaction(t *testing.T) {
 			store := &publishTransactionStore{t: t, videoStatus: tc.videoStatus, coverStatus: tc.coverStatus, fail: tc.fail}
 			db := sql.OpenDB(store)
 			t.Cleanup(func() { db.Close() })
-			handler := &Handler{DB: db}
-			h := server.New()
+			handler := &Handler{DB: database.WrapSQL(db)}
+			h := gin.New()
 			h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
 			coverURL := "/cover.svg"
 			if tc.cover {
@@ -54,7 +55,7 @@ func TestPublishTransaction(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp := ut.PerformRequest(h.Engine, http.MethodPost, "/videos", &ut.Body{Body: bytes.NewReader(body), Len: len(body)},
+			resp := ut.PerformRequest(h, http.MethodPost, "/videos", &ut.Body{Body: bytes.NewReader(body), Len: len(body)},
 				ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.want {
 				t.Errorf("expected HTTP %d, got %d: %s", tc.want, resp.StatusCode(), resp.Body())
@@ -106,11 +107,11 @@ func (c *publishTransactionConn) QueryContext(_ context.Context, query string, a
 	if !s.active {
 		s.t.Error("lookup must execute inside transaction")
 	}
-	q := strings.Join(strings.Fields(query), " ")
-	if q != "SELECT id, status FROM uploads WHERE saved_name = ? AND user_id = ? AND file_type = ? FOR UPDATE" {
+	q := strings.Join(strings.Fields(strings.ReplaceAll(query, "`", "")), " ")
+	if q != "SELECT id,status FROM uploads WHERE saved_name = ? AND user_id = ? AND file_type = ? LIMIT ? FOR UPDATE" {
 		s.t.Errorf("expected ownership lookup with row lock, got %s", q)
 	}
-	if len(args) != 3 || args[1].Value != int64(123) {
+	if len(args) != 4 || args[1].Value != int64(123) || args[3].Value != int64(1) {
 		return nil, errors.New("incorrect identity arguments")
 	}
 	cover := args[2].Value == "cover"
@@ -131,7 +132,7 @@ func (c *publishTransactionConn) ExecContext(_ context.Context, query string, ar
 	if !s.active {
 		s.t.Error("write must execute inside transaction")
 	}
-	q := strings.Join(strings.Fields(query), " ")
+	q := strings.Join(strings.Fields(strings.ReplaceAll(query, "`", "")), " ")
 	if strings.HasPrefix(q, "INSERT INTO videos") {
 		if s.fail == "insert" {
 			return nil, errors.New("private storage failure")
@@ -139,13 +140,13 @@ func (c *publishTransactionConn) ExecContext(_ context.Context, query string, ar
 		s.inserted = true
 		return publishTransactionResult{}, nil
 	}
-	if q != "UPDATE uploads SET status = 'published' WHERE id = ?" || len(args) != 1 {
+	if q != "UPDATE uploads SET status=? WHERE id = ?" || len(args) != 2 || args[0].Value != "published" {
 		return nil, errors.New("unexpected upload status update")
 	}
 	if !s.inserted {
 		s.t.Error("test expects video insertion before status updates")
 	}
-	switch args[0].Value {
+	switch args[1].Value {
 	case int64(11):
 		if s.fail == "video_update" {
 			return nil, errors.New("private storage failure")

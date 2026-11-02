@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS videos (
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
     KEY idx_videos_author_id (author_id),
+    KEY idx_videos_created_at_id (created_at, id),
     CONSTRAINT fk_videos_author FOREIGN KEY (author_id) REFERENCES users(id)
 );
 

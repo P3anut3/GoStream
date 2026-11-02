@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"gostream/internal/database"
 	"strings"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestSQLLikeRepositoryLikeVideo(t *testing.T) {
 			}}
 			db := sql.OpenDB(connector)
 			t.Cleanup(func() { db.Close() })
-			err := (&SQLLikeRepository{DB: db}).LikeVideo(ctx, 12, 34)
+			err := (&SQLLikeRepository{DB: database.WrapSQL(db)}).LikeVideo(ctx, 12, 34)
 			if !errors.Is(err, tc.wantError) {
 				t.Fatalf("expected error %v, got %v", tc.wantError, err)
 			}

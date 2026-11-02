@@ -36,7 +36,7 @@ function setup() {
     setTimeout: () => 0, clearTimeout() {},
     fetch: async (url, request) => {
       calls.push({ url, request });
-      let status = 200, data = { videos: [] };
+      let status = 200, data = { videos: [], next_cursor: "", has_more: false };
       if (url === "/uploads/videos") data = { play_url: "/media/videos/test.mp4" };
       if (url === "/uploads/covers") {
         data = { cover_url: "/media/covers/test.png" };
@@ -61,9 +61,12 @@ function setup() {
 
 (async () => {
   let app = setup();
+  app.run('state.scope = "mine"; state.page = 3');
   await app.submit();
   assert.equal(app.posts("/uploads/covers").length, 0);
   assert.equal(JSON.parse(app.posts("/videos")[0].request.body).cover_url, "/cover.svg");
+  assert.equal(app.run("state.scope"), "all", "publication must return to the public Feed");
+  assert.equal(app.calls.at(-1).url, "/feed?limit=6", "publication must refresh without an old cursor");
   console.log("PASS default cover without an image upload");
 
   app = setup();

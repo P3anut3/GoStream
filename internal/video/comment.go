@@ -1,13 +1,12 @@
 package video
 
 import (
-	"context"
 	"errors"
 	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/gin-gonic/gin"
 )
 
 type CreateCommentRequest struct {
@@ -15,7 +14,8 @@ type CreateCommentRequest struct {
 }
 
 // 创建评论
-func (h *Handler) CreateComment(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) CreateComment(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、获取评论者身份
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
@@ -35,7 +35,7 @@ func (h *Handler) CreateComment(ctx context.Context, c *app.RequestContext) {
 	}
 	// 3、解析评论内容
 	var req CreateCommentRequest
-	if err := c.BindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "请求体不是有效的评论 JSON",
 		})
@@ -76,7 +76,8 @@ func (h *Handler) CreateComment(ctx context.Context, c *app.RequestContext) {
 
 // 查看评论列表
 // 视频 ID、页码、每页数量的解析和检查仍属于 Handler。
-func (h *Handler) ListComments(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) ListComments(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1、获取视频ID
 	videoID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || videoID == 0 {
@@ -137,7 +138,8 @@ func (h *Handler) ListComments(ctx context.Context, c *app.RequestContext) {
 }
 
 // 删除评论
-func (h *Handler) DeleteComment(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) DeleteComment(c *gin.Context) {
+	ctx := c.Request.Context()
 	// 1. 获取当前登录用户
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)

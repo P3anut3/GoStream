@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/cloudwego/hertz/pkg/app/server"
-	"github.com/cloudwego/hertz/pkg/common/ut"
+	"github.com/gin-gonic/gin"
 	"gostream/internal/auth"
+	ut "gostream/internal/testutil"
 )
 
 type likeStatusRepositoryFunc func(context.Context, uint64, uint64) (LikeStatus, error)
@@ -62,10 +62,10 @@ func TestLikeStatusServiceAndHTTP(t *testing.T) {
 			if !errors.Is(err, tc.err) || status != tc.status {
 				t.Fatal("service must preserve result and error")
 			}
-			h := server.New()
+			h := gin.New()
 			handler := &Handler{LikeService: service}
 			h.GET("/videos/:id/like", auth.JWTAuth(secret), handler.GetLikeStatus)
-			resp := ut.PerformRequest(h.Engine, http.MethodGet, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
+			resp := ut.PerformRequest(h, http.MethodGet, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantCode {
 				t.Fatalf("expected %d, got %d", tc.wantCode, resp.StatusCode())
 			}

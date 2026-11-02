@@ -47,7 +47,7 @@ func TestClaimExpiredIntegration(t *testing.T) {
 			}
 		}
 	}()
-	repo := &SQLUploadRepository{DB: db}
+	repo := &SQLUploadRepository{DB: database.WrapSQL(db)}
 	before := time.Now().Truncate(time.Second).Add(-24 * time.Hour)
 	create := func(t *testing.T, name, kind, status string, at time.Time) uint64 {
 		t.Helper()

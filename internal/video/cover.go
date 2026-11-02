@@ -1,7 +1,7 @@
 package video
 
 import (
-	"context"
+	"errors"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -12,11 +12,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/gin-gonic/gin"
 )
 
 // UploadCover accepts a JPEG/PNG file and records its authenticated owner.
-func (h *Handler) UploadCover(ctx context.Context, c *app.RequestContext) {
+func (h *Handler) UploadCover(c *gin.Context) {
+	ctx := c.Request.Context()
 	value, exists := c.Get("userID")
 	userID, ok := value.(uint64)
 	if !exists || !ok || userID == 0 {
@@ -25,6 +26,11 @@ func (h *Handler) UploadCover(ctx context.Context, c *app.RequestContext) {
 	}
 	file, err := c.FormFile("file")
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "请求体过大"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, map[string]string{"error": "请通过 file 字段上传封面"})
 		return
 	}
@@ -71,10 +77,8 @@ func (h *Handler) UploadCover(ctx context.Context, c *app.RequestContext) {
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": "保存封面失败"})
 		return
 	}
-	_, err = h.DB.ExecContext(ctx,
-		`INSERT INTO uploads (user_id, saved_name, file_type) VALUES (?, ?, ?)`,
-		userID, savedName, "cover",
-	)
+	record := Upload{UserID: userID, SavedName: savedName, FileType: "cover"}
+	err = h.DB.WithContext(ctx).Select("UserID", "SavedName", "FileType").Create(&record).Error
 	if err != nil {
 		log.Printf("保存封面上传记录失败: %v", err)
 		if removeErr := os.Remove(filepath.Join(h.CoverDir, savedName)); removeErr != nil {

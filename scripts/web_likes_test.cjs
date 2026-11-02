@@ -31,7 +31,7 @@ function setup() {
     setTimeout: () => 0, clearTimeout() {},
     fetch: async (url, request) => {
       calls.push({ url, method: request.method, headers: request.headers });
-      let data = { videos: [] }, status = 200;
+      let data = { videos: [], next_cursor: "", has_more: false }, status = 200;
       const detail = url.match(/^\/videos\/(\d+)$/);
       if (detail) data = { id: Number(detail[1]), title: "test", author_id: 1, play_url: "/media/videos/test.mp4", cover_url: "/cover.svg", created_at: "2026-10-18" };
       const match = url.match(/^\/videos\/(\d+)\/like$/);
