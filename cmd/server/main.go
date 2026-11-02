@@ -15,6 +15,7 @@ import (
 	"gostream/internal/auth"
 	"gostream/internal/database"
 	"gostream/internal/feed"
+	"gostream/internal/follow"
 	"gostream/internal/httpx"
 	"gostream/internal/user"
 	"gostream/internal/video"
@@ -87,6 +88,9 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	feedRepository := &feed.GORMRepository{DB: db}
 	feedService := feed.NewService(feedRepository, feedCursor)
 	feedHandler := feed.NewHandler(feedService)
+	followRepository := &follow.GORMRepository{DB: db}
+	followService := follow.NewService(followRepository)
+	followHandler := follow.NewHandler(followService)
 	jwt := auth.JWTAuth(secret)
 	router.GET("/healthz", health.Live)
 	router.GET("/readyz", health.Ready(db))
@@ -107,6 +111,9 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	router.POST("/videos/:id/comments", jwt, videos.CreateComment)
 	router.GET("/videos/:id/comments", videos.ListComments)
 	router.DELETE("/comments/:id", jwt, videos.DeleteComment)
+	router.PUT("/users/:id/follow", jwt, followHandler.Follow)
+	router.GET("/users/:id/follow", jwt, followHandler.GetStatus)
+	router.DELETE("/users/:id/follow", jwt, followHandler.Unfollow)
 	httpx.RegisterWeb(router, "web/dist")
 	httpx.RegisterMedia(router, "/media/videos", videos.UploadDir)
 	httpx.RegisterMedia(router, "/media/covers", videos.CoverDir)

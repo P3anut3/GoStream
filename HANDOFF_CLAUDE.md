@@ -42,7 +42,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 3. `docs/learning/13_vue_migration.md`：最新前端、部署和验收记录。
 4. `README.md`、`frontend/README.md`：启动与复现命令。
 5. `cmd/server/main.go`：配置、依赖装配、实际路由和退出信号。
-6. `scripts/schema.sql`、`scripts/migrations/`：五张现有表及迁移。
+6. `scripts/schema.sql`、`scripts/migrations/`：六张现有表及 001～006 迁移。
 7. 做关注流前读 `internal/feed/{entity,cursor,service,repository,handler}.go`。
 
 其他记录：07 为 M0 验收，08 配置，09 健康检查，10 Docker，12 Compose。较早文档记录的是当时实现；最新现状以源码和 00/11/13 为准。
@@ -58,18 +58,19 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息 | `internal/feed`；只有 MySQL 最新流，无缓存、关注流或推荐模型 |
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
+| 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；页面入口和关注流待做 |
 | 上传清理 | pending/published/deleting 生命周期；24 小时未发布上传的手工预览/执行清理 | `cmd/cleanup-uploads`、`upload_cleanup*`；行锁协调发布与清理、失败重试，无自动定时调度 |
 | 配置与健康 | YAML+env 覆盖与校验；healthz/readyz；SIGINT/SIGTERM 退出 | `internal/config`、`internal/health`；readyz 对 DB Ping 最长 1 秒 |
 | 前端 | Vue/TS/Pinia/Router/Vite；注册登录、发布播放、Feed、我的作品、点赞评论、作者删除 | `frontend/src`；迁移及真实浏览器验收已完成 |
 | 容器 | 多阶段前后端构建、非 root、四服务 Compose、命名卷、健康依赖 | `Dockerfile`、`compose.yaml`；环境和持久化已验收 |
 | CI | Go 格式/vet/race/构建，前端测试/类型检查/构建/Chromium 夹具测试 | `.github/workflows/ci.yml`；2026-11-02 GitHub Actions 首次运行（#1，cdf4a69）通过 |
 
-现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`。
+现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`、`follows`。
 
 重要边界：
 
 - Redis/RabbitMQ 容器可用、环境读写/持久化测试通过，但 Go 业务没有相应 Client 或调用。不能说缓存、异步业务已接入。
-- 没有 follows、notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
+- 没有 notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
 - 媒体公开可读；未发布文件知道地址也能访问。前端隐藏按钮不等于后端授权。
@@ -121,6 +122,7 @@ Feed 的 `Service.ListLatestForViewer` 调 Repository 查询 limit+1 条，裁�
 | GET | /videos/:id/comments | 公开 |
 | POST | /videos/:id/comments | JWT |
 | DELETE | /comments/:id | JWT，仅评论作者 |
+| GET/PUT/DELETE | /users/:id/follow | JWT；PUT 自关注 400、目标不存在 404；DELETE 一律 204 |
 | GET/HEAD | /media/videos/:filename、/media/covers/:filename | 公开，支持 Range |
 | GET | /healthz、/readyz | 公开 |
 
@@ -253,7 +255,9 @@ try {
 
 ## 11. 下一步：M2 关注关系与关注流
 
-这是待实现设计，不是已有功能。先按小步骤指导，不要一次写完 M2～M6。
+进度（2026-11-02）：表设计（006 迁移）与关注/取消/状态 API 已完成并提交，含单元、HTTP、真实 MySQL 集成和端到端测试；状态码已定稿（PUT 204/400/404，DELETE 一律 204，GET 200/404）。下一步是作者关注按钮——已有的 Windows 库和 Compose 数据卷要先执行 006 迁移，须用户确认——然后是关注流。
+
+以下为原设计；关系 API 已按此实现，关注流仍待实现。先按小步骤指导，不要一次写完 M2～M6。
 
 ### 第一节建议
 

@@ -61,3 +61,14 @@ CREATE TABLE IF NOT EXISTS video_comments (
         ON DELETE CASCADE,
     CONSTRAINT fk_video_comments_user FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE TABLE IF NOT EXISTS follows ( -- 关注表
+    follower_id BIGINT UNSIGNED NOT NULL,
+    followee_id BIGINT UNSIGNED NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (follower_id, followee_id),
+    KEY idx_follows_followee_id (followee_id),
+    CONSTRAINT fk_follows_follower FOREIGN KEY (follower_id) REFERENCES users(id),
+    CONSTRAINT fk_follows_followee FOREIGN KEY (followee_id) REFERENCES users(id),
+    CONSTRAINT chk_follows_not_self CHECK (follower_id <> followee_id)
+);

@@ -93,17 +93,18 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 评论重复发送是否防重需要单独产品约定，不能把重复内容一律当成重复请求。
 - 验收：两个用户点赞数一致、个人状态不同；重复点赞不增加记录；删除他人评论失败；不存在视频不能新增互动。
 
-## 7. 关注关系（拟定）
+## 7. 关注关系（关系 API 已实现，关注流待实现）
 
-业务目标：A 关注 B，关注列表能筛选 B 的作品。
+业务目标：A 关注 B，关注流只展示 B 等已关注作者的作品。
 
-- 拟定接口：PUT/DELETE /users/:id/follow、GET /users/:id/follow、GET /feed/following。
-- 拟定表：follows(follower_id,followee_id,created_at)，联合主键；另按 followee_id 建索引用于粉丝方向查询。
-- 操作者 follower_id 来自 JWT，目标 followee_id 来自路径。
-- 检查目标用户存在、不能关注自己；重复关注/取消返回成功，不重复生成事件。
-- 关注流限定作者属于当前用户关注集合，按稳定时间+ID续读。
+- 已实现模块 internal/follow：Handler → Service → Repository。目录名采用 follow，不再使用早期规划的 social/。
+- 表 follows(follower_id,followee_id,created_at)：联合主键防重复；idx_follows_followee_id 用于粉丝方向查询；两个外键指向 users(id)，不级联删除（当前没有删除用户的功能）；CHECK (follower_id <> followee_id) 兜底禁止自关注。迁移 006 与 schema.sql 建出的结构一致。
+- 操作者 follower_id 只来自 JWT，目标 followee_id 来自路径；请求体中的身份字段被忽略。
+- 接口约定：PUT /users/:id/follow 首次与重复均为 204，自关注 400，目标不存在 404；DELETE /users/:id/follow 一律 204（关系不存在即已达成目标）；GET /users/:id/follow 返回 {"following": bool}，目标不存在 404，禁止共享缓存。
+- Repository 用 INSERT … SELECT 在一条语句中检查目标存在并插入，用主键冲突 1062 识别重复；Service 拒绝自关注，并把重复关注视为成功。Repository 仍区分"新建"和"已存在"，M4 只对首次关注产生通知事件。
+- 关注流（待实现）：GET /feed/following，作者限定为当前用户的关注集合，沿用 created_at、id 稳定排序与 limit+1；游标需区分 latest 与 following。
 - 不把关注关系和缓存同时当作两份事实；MySQL 是事实，Redis 是后续加速层。
-- 验收：A 关注 B 不等于 B 关注 A；三个账号可证明筛选正确；取消关系后刷新结果更新。
+- 验收：关系 API 已由单元、HTTP、真实 MySQL 集成和端到端测试覆盖（有向、幂等、自关注、目标不存在、未登录、非法 ID、跨账号隔离）；关注流的三账号筛选、取关后刷新待实现后验证。
 
 ## 8. 事件、Worker 与通知（拟定）
 
@@ -148,7 +149,7 @@ internal/
   user/ auth/         已有用户与认证
   video/              已有作品、上传、点赞、评论
   feed/               已有最新流
-  social/             M2 关注关系
+  follow/             M2 关注关系（已有关系 API）
   notification/       M4 通知
   config/             M1 配置
   database/ httpx/    已有基础设施

@@ -18,7 +18,7 @@
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
 | 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis/MQ 尚无业务调用；没有吞吐量结论 |
 
-现有数据库有 users、videos、uploads、video_likes、video_comments 五张业务表。没有 follows、notifications、outbox_events 等表。
+现有数据库有 users、videos、uploads、video_likes、video_comments、follows 六张业务表（follows 由 006 迁移加入）。没有 notifications、outbox_events 等表。
 
 分层应按实际源码描述：用户、Feed、点赞、评论已有 Handler → Service → Repository；部分视频与上传操作仍在 Handler，不能宣称已经全项目统一。后续接入视频缓存、发布事件时再沿业务边界下沉这些操作，保留已经实现的归属和事务规则。
 
@@ -44,7 +44,7 @@
 
 | 业务差距 | 参考实现 | 我们的优先级 |
 | --- | --- | --- |
-| 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 高：下一批新业务，形成社会关系与筛选链路 |
+| 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 高：关注/取关/状态已实现；粉丝列表/计数与关注流待做 |
 | 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果 |
 | 分片、进度查询、合并、恢复上传 | video/chunk_handler.go | 高：完整技术栈对齐的一部分，但在 Redis 基础后做 |
 | Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 中高：放在 Redis 阶段，明确过期/刷新/撤销语义 |

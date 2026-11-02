@@ -69,7 +69,7 @@ API 容器里的 `127.0.0.1` 是 API 容器自己，并不是 Windows，也不�
 
 ## 4. 初始化与健康检查
 
-新建 MySQL 数据卷第一次启动时，官方镜像执行只读挂载的 `scripts/schema.sql`，创建五张业务表。复用已有数据库卷时不会重新执行初始化脚本；以后表结构改变仍需要显式执行迁移，不能只改 schema 后重启。
+新建 MySQL 数据卷第一次启动时，官方镜像执行只读挂载的 `scripts/schema.sql`，创建全部业务表（当前六张，含 006 新增的 follows）。复用已有数据库卷时不会重新执行初始化脚本；以后表结构改变仍需要显式执行迁移，不能只改 schema 后重启。
 
 MySQL 健康检查使用应用账号连接数据库，并确认 users 表可查询。API 的 `depends_on: mysql: condition: service_healthy` 等待这个条件满足后启动；API 自身使用 `/readyz` 做健康检查。Redis 通过带密码的 PING 检查，RabbitMQ 检查节点运行状态。
 

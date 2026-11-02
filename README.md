@@ -18,6 +18,7 @@
 - JPEG/PNG 封面上传（最大 5 MiB）、预览、默认封面与归属校验。
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
+- 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。页面入口与关注流尚未实现。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。Compose 已准备 Redis/RabbitMQ，Go 业务尚未接入；当前仍为单进程模块化应用。
 
@@ -175,6 +176,9 @@ go run ./cmd/server
 | GET | `/videos/:id/like` | Bearer token | 200，`like_count` 和当前用户的 `liked` |
 | PUT | `/videos/:id/like` | Bearer token | 204，无响应体；重复点赞仍成功 |
 | DELETE | `/videos/:id/like` | Bearer token | 204，无响应体；重复取消仍成功 |
+| GET | `/users/:id/follow` | Bearer token | 200，`following`：当前用户是否关注目标用户 |
+| PUT | `/users/:id/follow` | Bearer token | 204，无响应体；重复关注仍成功，不能关注自己 |
+| DELETE | `/users/:id/follow` | Bearer token | 204，无响应体；重复取消仍成功 |
 | POST | `/uploads/videos` | Bearer token | 200，原文件名、随机文件名、大小及 `play_url` |
 | POST | `/uploads/covers` | Bearer token | 200，原文件名、随机文件名、大小及 `cover_url` |
 | GET / HEAD | `/media/covers/:filename` | 不需要 | 封面图片内容或头信息 |
@@ -275,6 +279,19 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
+关注关系的 MySQL 测试不读取 `.env`，只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+
+```powershell
+docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
+$env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
+try {
+    go test -v ./internal/follow ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration)$' -count=1
+} finally {
+    Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
+    docker rm -f gostream-test-mysql
+}
+```
+
 当前环境可能打印 Sonic 不支持该 Go 版本并回退到 `encoding/json` 的警告；已观察到现有测试可通过，不表示已完成依赖兼容性验证。
 
 ## 文件导航
@@ -295,17 +312,18 @@ try {
 | `internal/video/delete_integration_test.go` | 连接 MySQL 的删除权限集成测试 |
 | `internal/video/storage.go`、`storage_test.go` | 文件保存和测试 |
 | `internal/video/upload_test.go` | 上传与公开文件读取测试 |
+| `internal/follow/` | 关注关系的 Handler、Service、Repository 及测试 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
 | `.github/workflows/ci.yml` | Go 检查/race、前端检查/构建和浏览器夹具回归 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
+目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`、`feed`、`follow`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询、关注关系也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
 
 ## 下一阶段
 
-下一项业务是 M2 关注关系与关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系 API 已完成，接下来是作者关注按钮和关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -381,3 +399,16 @@ Vue 迁移已完成 Chromium 响应夹具回归和隔离 Compose 中的真实双
 Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400、视频不存在映射为 404、存储异常映射为 500。原有请求、状态码、成功响应字段和安全错误提示保持不变。测试中的 Handler 也必须明确配置 CommentService。
 
 `go test -v ./internal/video -run '^TestCommentServiceCreateComment$'` 不启动 HTTP、不访问 MySQL，8 个子场景通过仓储替身验证非法内容不触发存储、内容规范化、中文及 emoji 边界、错误及 context 传递。其他 Service 测试验证删除、点赞及查询行为，真实 MySQL 联调继续验证整条 HTTP → Service → Repository 链路。
+
+### 关注关系
+
+`internal/follow` 按 Handler → Service → Repository 分层。操作人只来自 JWT，目标用户来自路径 `:id`；请求体中的身份字段一律忽略。
+
+- `PUT /users/:id/follow`：关注。首次和重复关注都返回 204；关注自己返回 400，目标用户不存在返回 404。
+- `DELETE /users/:id/follow`：取消关注。本来没关注、目标不存在或目标是自己都返回 204，表示当前已不再关注。
+- `GET /users/:id/follow`：返回 `{"following": true|false}`，带 `Cache-Control: private, no-store` 和 `Vary: Authorization`；目标用户不存在返回 404。
+- 三个接口都要求 Bearer token，缺失或无效返回 401；非法、零、负数或溢出的 ID 返回 400；数据库异常返回 500，不回显内部错误。
+
+`follows(follower_id, followee_id, created_at)` 以 `(follower_id, followee_id)` 为主键防止重复关注，`idx_follows_followee_id` 支持反向查询，两个外键指向 `users(id)`，`CHECK (follower_id <> followee_id)` 在数据库层兜底禁止自关注。新库由 `scripts/schema.sql` 创建；已有库执行一次 `scripts/migrations/006_follows.sql`。
+
+默认测试用假驱动和仓储替身覆盖 SQL、参数顺序、错误翻译、业务规则和 25 个 HTTP 场景。设置 `GOSTREAM_TEST_MYSQL_DSN` 后，另运行 Repository 集成测试和端到端 HTTP 测试（注册登录、关注、幂等、拒绝情况、跨账号隔离、取消），运行方式见“测试与验证范围”。页面入口与关注流尚未实现。

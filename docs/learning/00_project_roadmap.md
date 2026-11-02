@@ -25,7 +25,7 @@ flowchart LR
     F --> H[我的视频管理作品]
     C --> I[点赞与评论]
     I --> J[作者收到通知：后续实现]
-    C --> K[关注作者：后续实现]
+    C --> K[关注作者：API 已实现，页面待接入]
     K --> L[关注流：后续实现]
 ```
 
@@ -45,7 +45,8 @@ flowchart LR
 | 点赞、评论 | internal/video/like*、comment* | 分层、接口、页面、Feed 批量信息和双账号验收已完成 | 异步通知待后续加入 |
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
-| Redis、RabbitMQ、SSE、关注 | compose.yaml 提供 Redis/MQ 容器，尚无业务 Client | Redis/MQ 环境已验收；业务及其余能力未实现 | 按后续里程碑推进 |
+| 关注关系 | internal/follow、scripts/migrations/006_follows.sql | 关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成与端到端测试 | 作者关注按钮、关注流 |
+| Redis、RabbitMQ、SSE | compose.yaml 提供 Redis/MQ 容器，尚无业务 Client | Redis/MQ 环境已验收；业务及其余能力未实现 | 按后续里程碑推进 |
 | 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
 “有源码/有测试”不等于当前浏览器进程正在运行最新版本。实际验收方式及覆盖边界见 [M0 验收记录](07_m0_acceptance.md)；没有进行压测。
@@ -83,7 +84,7 @@ flowchart TD
 | 视频作品 | 发布、详情、我的作品、删除 | 作品记录、发布事务、写权限 | 已有 |
 | Feed | 首页加载更多、刷新 | 内容顺序、分页、批量组装、以后缓存/降级 | 后端及页面已有并验收 |
 | 互动 | 点赞、评论、删除本人评论 | 唯一约束、幂等、内容校验、计数 | 已有 |
-| 关注 | 关注/取消、关注流 | 有向关系、自关注检查、按关系筛选 | 待开发 |
+| 关注 | 关注/取消、关注流 | 有向关系、自关注检查、按关系筛选 | 关系 API 已实现；页面与关注流待开发 |
 | 通知 | 收到点赞/评论/关注提醒 | 事件处理、持久化、未读、SSE | 待开发 |
 | 行为与推荐扩展 | 曝光、播放等 | 事件定义、去重、推荐组件边界 | 延后，不训练模型 |
 | 工程基础 | 环境启动、错误排查、部署 | 配置、依赖连接、观测、迁移、CI | 部分已有 |
@@ -128,6 +129,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 页面添加作者入口和关注流入口，不做复杂个人主页。
 - 验收：A 关注 B 后可见 B 的视频；取消后新查询不可见；重复操作幂等；不能关注自己。
 - 学习重点：关系表、联合唯一键、接口幂等、EXISTS/JOIN、鉴权与目标 ID 的不同来源。
+- 进度（2026-11-02）：follows 表（006 迁移）与关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成和端到端测试；作者关注按钮与 GET /feed/following 待实现。
 
 ### M3：Redis 在真实读链路中发挥作用
 
@@ -221,7 +223,7 @@ M0-1 实施记录：公共页面已使用 /feed，新增加载更多、刷新重
 
 2026-11-01 已补真实浏览器验收：隔离环境 7 条作品验证 6+1 条追加、末尾停止、刷新、我的视频切换；页面上传发布和双账号互动另有独立记录。详见 07_m0_acceptance.md，不把模拟 DOM 测试当作完整浏览器验证。
 
-M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。下一项业务为 M2 关注模块。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。Redis 和 MQ 在环境中启动不算业务接入。
+M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注模块进行中：关系 API 已完成，页面入口与关注流待实现。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。Redis 和 MQ 在环境中启动不算业务接入。
 
 ## 10. 本轮依据与边界
 
