@@ -104,6 +104,6 @@ try {
 
 main 当前捕获 os.Interrupt 和 syscall.SIGTERM。SIGTERM 验收时镜像标识为 sha256:c43f8f1174695ec8d610cf5e5f295b78c9177667ac759e5d8273192f4c0b72ce；前面的 290c34… 是首轮构建记录。之后 Vue 迁移再次重建，不能用这些历史标识代表最新镜像。默认 docker stop 已通过正常退出验证，没有覆盖耗时请求排空。
 
-Compose 初始化、四个服务的健康状态、命名卷与 down/up 后数据保留已由独立测试验收。Vue 迁移、镜像内构建和真实浏览器验收也已完成，见 [Compose 环境](12_compose_environment.md)与 [Vue 迁移](13_vue_migration.md)。可选 checks 目标已实际通过 Linux vet/race 测试，不进入运行镜像。基础 CI 已写但尚未接远端运行，Redis/MQ 业务接入仍在后续阶段。
+Compose 初始化、四个服务的健康状态、命名卷与 down/up 后数据保留已由独立测试验收。Vue 迁移、镜像内构建和真实浏览器验收也已完成，见 [Compose 环境](12_compose_environment.md)与 [Vue 迁移](13_vue_migration.md)。可选 checks 目标已实际通过 Linux vet/race 测试，不进入运行镜像。基础 CI 已在 GitHub Actions 首次运行通过，Redis/MQ 业务接入仍在后续阶段。
 
 参考：[Docker 多阶段构建](https://docs.docker.com/build/building/multi-stage/)、[构建上下文与 dockerignore](https://docs.docker.com/build/concepts/context/)、[Docker 的 Go 指南](https://docs.docker.com/guides/golang/)。

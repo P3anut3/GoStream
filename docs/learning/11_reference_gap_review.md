@@ -1,6 +1,6 @@
 # GoStream 与 feedsystem_video_go：模块盘点和后续重点
 
-核对日期：2026-11-02。参考项目为 LeoninCS/feedsystem_video_go，读取 main 对应提交 `7c1c27d179bf22246931d249267a57df8b5cca4b`。本地以当前未提交源码为准，验收记录见 07～13。初次盘点之后已补 Compose、Vue 迁移和基础 CI 配置；GitHub CI 尚未实际触发。
+核对日期：2026-11-02。参考项目为 LeoninCS/feedsystem_video_go，读取 main 对应提交 `7c1c27d179bf22246931d249267a57df8b5cca4b`。本地以当时源码（现为提交 cdf4a69）为准，验收记录见 07～13。初次盘点之后已补 Compose、Vue 迁移和基础 CI 配置；2026-11-02 阶段提交推送后，GitHub CI 首次运行通过。
 
 结论：GoStream 已形成「注册登录 → 上传 → 发布 → 最新流 → 播放 → 点赞评论 → 我的作品管理」的基础闭环。主要差距集中在缓存、异步事件与通知、关注关系、大文件上传，以及完整的部署和前端工程。不能把这些阶段用一个缺乏依据的完成百分比表示。
 
@@ -16,7 +16,7 @@
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
-| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已写但远端未运行；Redis/MQ 尚无业务调用；没有吞吐量结论 |
+| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis/MQ 尚无业务调用；没有吞吐量结论 |
 
 现有数据库有 users、videos、uploads、video_likes、video_comments 五张业务表。没有 follows、notifications、outbox_events 等表。
 
@@ -36,7 +36,7 @@
 | Vue 3 / TS / Pinia / Router / Vite | 页面组件、类型约束、状态与路由、前端构建；参考 vite 指向 rolldown-vite 别名 | 已迁移，采用原生 Rolldown 的 Vite 8；构建及浏览器验收通过 | M1 已完成此项；不为复制旧别名降级 |
 | spark-md5 / 分片上传 | 浏览器文件摘要、Redis 会话、上传进度与分片合并 | 未实现 | M5 |
 | Docker Compose | MySQL/Redis/RabbitMQ/API/Worker/前端、网络、卷和健康依赖 | 四服务已验收；Vue 构建产物由 API 镜像提供；Worker 待实现 | M1 环境就绪，独立 Worker 在 M4 |
-| CI / miniredis / pprof | 自动 Go 检查与前端构建、Redis 测试替身、性能诊断 | 基础 CI 工作流已写，本地检查通过；无远端运行/miniredis/pprof | M1 关联远端后验证 CI，Redis 测试在 M3，诊断与性能在 M6 |
+| CI / miniredis / pprof | 自动 Go 检查与前端构建、Redis 测试替身、性能诊断 | 基础 CI 已在 GitHub Actions 运行通过；无 miniredis/pprof | Redis 测试在 M3，诊断与性能在 M6 |
 
 核对来源：[后端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/go.mod)、[前端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/frontend/package.json)、[Feed 实现](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/feed/service.go)、[路由和装配](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/http/router.go)、[Compose](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/docker-compose.yml)、[CI](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/.github/workflows/ci.yml)。
 
@@ -78,7 +78,7 @@ GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先
 
 | 阶段 | 重点任务 | 必须留下的验收结果 |
 | --- | --- | --- |
-| M1 收尾：环境与展示 | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
+| M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
 | M2：关注与关注流 | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
 | M3：缓存与认证增强 | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
 | M4：可靠事件与通知 | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
@@ -96,8 +96,8 @@ M1 和 M6 的分工：M1 先建立基础自动检查，不等到功能全部完�
 1. 学习者已添加 os.Interrupt + syscall.SIGTERM；导师已重建镜像，并用默认 docker stop 验证正常退出。
 2. Compose 网络、服务名、初始化、健康依赖、命名卷与端口已完成；隔离测试验证 down/up 后账号、作品、上传文件、Redis 值和 RabbitMQ 消息保留。见 [Compose 环境](12_compose_environment.md)，不复用本机业务库做初始化或清理。
 3. Vue 技术栈和前后端真实双账号闭环验收已完成，见 [迁移记录](13_vue_migration.md)。
-4. 基础 CI 工作流已编写；git remote -v 仍没有输出，多个实现处于暂存/工作区；需要整理阶段提交、关联远端并实际触发 CI。本轮没有提交或推送。
-5. M1 完成后立即进入关注模块，再进入 Redis 与异步事件主线。
+4. 2026-11-02 已创建阶段提交 cdf4a69、关联 GitHub 远端 origin 并推送；GitHub Actions 首次运行（GoStream checks #1）的 backend、frontend 均通过。
+5. M1 已完成，下一步进入关注模块，再进入 Redis 与异步事件主线。
 
 ## 7. 当前已经能够解释的项目内容
 

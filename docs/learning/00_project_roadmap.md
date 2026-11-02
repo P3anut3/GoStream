@@ -46,7 +46,7 @@ flowchart LR
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
 | Redis、RabbitMQ、SSE、关注 | compose.yaml 提供 Redis/MQ 容器，尚无业务 Client | Redis/MQ 环境已验收；业务及其余能力未实现 | 按后续里程碑推进 |
-| 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已写 | 阶段提交、远端及 CI 首次运行、pprof 待完成 |
+| 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
 “有源码/有测试”不等于当前浏览器进程正在运行最新版本。实际验收方式及覆盖边界见 [M0 验收记录](07_m0_acceptance.md)；没有进行压测。
 
@@ -92,7 +92,7 @@ flowchart TD
 
 ## 6. 固定里程碑：一次只做一个
 
-### M0：把当前产品接成完整流程（核心验收完成，提交待整理）
+### M0：把当前产品接成完整流程（完成）
 
 目标：从页面完成“登录 → 发布 → 首页看到 → 播放 → 互动 → 我的作品管理”。
 
@@ -102,12 +102,12 @@ flowchart TD
 | M0-2（完成） | 增加 (created_at,id) 索引迁移、同步新库 schema | 隔离迁移/EXPLAIN 通过；用户已提供业务库执行成功及小表计划输出；无性能提升数值结论 |
 | M0-3（代码和测试完成） | Feed 批量补充作者信息、点赞数和当前用户状态 | 普通测试、MySQL/HTTP 验证非空 3 次读取，游客/A/B 个人状态正确；真实浏览器验收并入 M0-4 |
 | M0-4（核心流程完成） | 用账号 A/B 验收完整场景，保存操作步骤 | 真实 HTTP/MySQL、双账号页面发布/互动/个人状态及多批加载通过；删除确认由 HTTP 测试覆盖，见 07_m0_acceptance.md |
-| M0-5（文档已整理，待提交） | 整理本阶段改动、文档与提交 | 验收记录和复现方法已保存；尚未创建里程碑提交，不带密钥和上传文件 |
+| M0-5（完成） | 整理本阶段改动、文档与提交 | 验收记录和复现方法已保存；2026-11-02 随阶段提交 cdf4a69 入库，不含密钥和上传文件 |
 
 M0 不迁移 Vue，不接 MQ，不继续扩展游标加密形式，不改写全部旧 Handler。
 优先 M0-1 是为了先让学习者能看见整个流程；索引仍在本里程碑内完成，不是永远推迟。
 
-### M1：开发与展示环境统一
+### M1：开发与展示环境统一（完成）
 
 目标：参考技术栈开始真正进入项目，而不是只有依赖名称。
 
@@ -182,7 +182,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 | amqp091-go / RabbitMQ / Worker | RabbitMQ 容器已准备，Go 业务与 Worker 未实现 | M4 | 可靠异步通知与后续事件处理 |
 | SSE | 未实现 | M4 | 通知即时提示与重连补读 |
 | 分片上传 / spark-md5 | 未实现 | M5 | 上传恢复与前端分片能力 |
-| CI / health / pprof | 健康检查已回归；基础 CI 已写，GitHub 实际运行待接远端；pprof 待实现 | M1/M6 | 可运行、可回归、可定位 |
+| CI / health / pprof | 健康检查已回归；基础 CI 已在 GitHub Actions 运行通过；pprof 待实现 | M1/M6 | 可运行、可回归、可定位 |
 
 对齐的是技术的有效使用与故障处理，不强制复制依赖补丁版本、全部接口或私聊/推荐模型。
 参考依赖依据 backend/go.mod、frontend/package.json 和根目录 docker-compose.yml、.github/workflows/ci.yml。
@@ -221,7 +221,7 @@ M0-1 实施记录：公共页面已使用 /feed，新增加载更多、刷新重
 
 2026-11-01 已补真实浏览器验收：隔离环境 7 条作品验证 6+1 条追加、末尾停止、刷新、我的视频切换；页面上传发布和双账号互动另有独立记录。详见 07_m0_acceptance.md，不把模拟 DOM 测试当作完整浏览器验证。
 
-M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；基础 CI 已写，待阶段提交、远端关联和 GitHub 首次运行。下一项业务为 M2 关注模块。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。Redis 和 MQ 在环境中启动不算业务接入。
+M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。下一项业务为 M2 关注模块。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。Redis 和 MQ 在环境中启动不算业务接入。
 
 ## 10. 本轮依据与边界
 

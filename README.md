@@ -2,7 +2,7 @@
 
 一个用于学习 Go 后端开发的短视频项目，逐个模块实现和验证。当前完成用户认证、视频元数据管理、视频及封面本地上传、文件归属校验与公开文件访问，并提供 Vue 3 + TypeScript + Pinia + Vue Router 工作台。
 
-开发与学习的统一入口：[项目主线与阶段计划](docs/learning/00_project_roadmap.md)、[模块设计与数据流](docs/learning/04_module_design.md)。M0 核心流程见 [验收记录](docs/learning/07_m0_acceptance.md)。配置管理、健康检查、[API 镜像](docs/learning/10_container_basics.md)、[Compose 持久化](docs/learning/12_compose_environment.md)、[Vue 迁移与真实双账号浏览器验收](docs/learning/13_vue_migration.md)已完成。基础 CI 工作流已准备；阶段提交、远端关联及 GitHub 首次运行仍待完成。
+开发与学习的统一入口：[项目主线与阶段计划](docs/learning/00_project_roadmap.md)、[模块设计与数据流](docs/learning/04_module_design.md)。M0 核心流程见 [验收记录](docs/learning/07_m0_acceptance.md)。配置管理、健康检查、[API 镜像](docs/learning/10_container_basics.md)、[Compose 持久化](docs/learning/12_compose_environment.md)、[Vue 迁移与真实双账号浏览器验收](docs/learning/13_vue_migration.md)已完成。M1 阶段提交已推送到 GitHub，基础 CI 首次运行通过。
 
 ## 当前功能
 
@@ -305,7 +305,7 @@ try {
 
 ## 下一阶段
 
-下一项业务是 M2 关注关系与关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 已编写，但仓库没有远端，尚未在 GitHub 实际触发。
+下一项业务是 M2 关注关系与关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 

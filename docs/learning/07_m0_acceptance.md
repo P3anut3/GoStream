@@ -80,7 +80,7 @@ RowsAffected == 0：不存在，或者不属于当前用户
 
 go test ./... 通过（不启用外部服务测试的普通入口）；另显式启用 GOSTREAM_INTEGRATION_TEST=1，TestGinGORMHTTPIntegration 和 TestFeedHTTPMySQLIntegration 均 PASS，命令退出码 0。
 Feed/发布/点赞/评论的 Node 模拟回归分别 11/7/8/8 组通过，均退出码 0。
-M0-4 的核心用户流程与多批加载验收完成，以上保留了测试方式和覆盖边界；M0-5 文档已整理，尚未创建里程碑提交。
+M0-4 的核心用户流程与多批加载验收完成，以上保留了测试方式和覆盖边界；M0-5 文档已整理，2026-11-02 随阶段提交 cdf4a69 入库。
 
 复现手工浏览器环境（项目根目录 PowerShell）：
 

@@ -1,6 +1,6 @@
 # M1：Compose 开发环境
 
-状态（2026-11-02）：四服务、SIGTERM、隔离重建及持久化测试已通过；后续 Vue 迁移与真实浏览器验收也已完成，见 [迁移记录](13_vue_migration.md)。Redis/RabbitMQ 仅完成环境准备。基础 CI 已写，阶段提交及 GitHub 首次运行待完成。
+状态（2026-11-02）：四服务、SIGTERM、隔离重建及持久化测试已通过；后续 Vue 迁移与真实浏览器验收也已完成，见 [迁移记录](13_vue_migration.md)。Redis/RabbitMQ 仅完成环境准备。阶段提交已推送到 GitHub，基础 CI 首次运行通过。
 
 本机 `gostream-dev` 开发栈已启动，四服务均 healthy；首页返回 200，`/healthz` 和 `/readyz` 均返回 ok。使用全新的开发卷，没有导入原 Windows MySQL 数据。原停止状态的 redis 容器和原本机配置保留。
 
@@ -120,6 +120,6 @@ try {
 
 ## 7. 下一步与阅读检查
 
-Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；M1 还待阶段提交、远端关联及 GitHub 首次运行。下一项业务为 M2 关注模块，再在 M3/M4 加 Redis 和 MQ 的业务读写。
+Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。下一项业务为 M2 关注模块，再在 M3/M4 加 Redis 和 MQ 的业务读写。
 
 先尝试回答：API 为什么访问 mysql:3306，而你在 Windows 连接数据库却使用 127.0.0.1:13307？如果只删 API 容器，作品记录和视频文件分别靠什么保留？

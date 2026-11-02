@@ -62,7 +62,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 配置与健康 | YAML+env 覆盖与校验；healthz/readyz；SIGINT/SIGTERM 退出 | `internal/config`、`internal/health`；readyz 对 DB Ping 最长 1 秒 |
 | 前端 | Vue/TS/Pinia/Router/Vite；注册登录、发布播放、Feed、我的作品、点赞评论、作者删除 | `frontend/src`；迁移及真实浏览器验收已完成 |
 | 容器 | 多阶段前后端构建、非 root、四服务 Compose、命名卷、健康依赖 | `Dockerfile`、`compose.yaml`；环境和持久化已验收 |
-| CI | Go 格式/vet/race/构建，前端测试/类型检查/构建/Chromium 夹具测试 | `.github/workflows/ci.yml` 已编写，尚未在 GitHub 实际运行 |
+| CI | Go 格式/vet/race/构建，前端测试/类型检查/构建/Chromium 夹具测试 | `.github/workflows/ci.yml`；2026-11-02 GitHub Actions 首次运行（#1，cdf4a69）通过 |
 
 现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`。
 
@@ -198,7 +198,7 @@ go run ./cmd/server
 - 隔离 Compose 项目中真实 Chromium 双账号验收通过：注册自动登录、视频/封面上传、发布、实际 MP4 解码与播放时间推进、Range 206、点赞评论、本人评论删除、越权拒绝、公共和个人 6+1 分页、作者删除。
 - API 容器测试通过：非 root、自定义媒体目录、上传发布、MySQL 停机 readyz 200→503→200、healthz 保持 200、数据保留、默认 SIGTERM 退出码 0。
 - Compose 全部容器 down/up 后账号/JWT、作品、上传文件、Redis 值和 RabbitMQ 持久消息保留；随机测试项目资源最终清理。
-- 最后开发环境检查首页与构建 JS 返回 200、readyz=ok。不能宣称全浏览器兼容、生产压测或 GitHub CI 已通过。
+- 最后开发环境检查首页与构建 JS 返回 200、readyz=ok。不能宣称全浏览器兼容或生产压测；GitHub CI 首次运行结果见第 10 节。
 
 普通检查：
 
@@ -237,15 +237,17 @@ try {
 
 测试视频为 frontend/tests/fixtures/playable.mp4，自行生成的移动色块，不含用户媒体。截图和 trace 在 frontend/test-results，已忽略。只覆盖 Chromium，不宣称所有格式/编码可播放。
 
-## 10. Git 与尚未收尾的工程事项
+## 10. Git 与远端（2026-11-02 已收尾）
 
-本次核查 Git 最近提交：`1a30aba feat: add transactional upload lifecycle and cleanup command`。
+交接之后已完成 M1 的工程收尾：
 
-之后有大量已暂存、未暂存和未跟踪文件，包含用户练习及导师实现；部分文件为 AM，暂存版本与工作区版本不同。绝不能用 reset --hard、checkout --、clean 等丢弃这些成果，也不要只看 HEAD 就误判 Feed、Vue 等未实现。
+- 阶段提交 `cdf4a69 feat: migrate to Gin/GORM, add latest feed, config and Vue frontend` 收入了交接时全部已暂存、未暂存和未跟踪的成果（143 个文件）。提交前用本机 `.env`、`.env.compose` 的真实密钥值比对过全部入库文件，无命中。
+- 远端 origin 是 GitHub 仓库 `P3anut3/GoStream`（当前 Private），main 已推送并跟踪 origin/main。
+- GitHub Actions 首次运行（GoStream checks #1，提交 cdf4a69）的 backend、frontend 两个 job 均通过。CI 不包含需要真实 MySQL 或 Docker 的集成测试。
 
-`git remote -v` 当前无输出。用户暂未提供 GoStream GitHub 仓库地址；还没有本轮阶段提交或推送。
+本机全局 git 配置了代理 `127.0.0.1:7890`，代理没开时访问 GitHub 会失败，可用 `git -c "http.proxy=" -c "https.proxy=" push` 临时直连。本机没有 gh CLI，仓库为 Private 时匿名 API 读不到 CI，结果需要用户在网页查看。
 
-CI 文件已准备，但远端关联、阶段提交及 GitHub 首次运行待完成。不要写“GitHub CI 已绿”。接手可先盘点差异和忽略规则，再根据用户要求整理提交、确认仓库目标；不要把真实配置和上传媒体加入 Git。
+以后仍不能用 reset --hard、checkout --、clean 等丢弃用户未提交的成果，也不要把真实配置和上传媒体加入 Git。
 
 本机 .env/.env.compose、node_modules、web/dist、上传目录和测试证据已忽略。不要因为忽略文件不在 Git，就随意重建或覆盖本机凭证。
 
@@ -284,7 +286,7 @@ CI 文件已准备，但远端关联、阶段提交及 GitHub 首次运行待完
 
 | 阶段 | 主线 |
 | --- | --- |
-| M1 剩余 | 阶段提交、远端关联、GitHub 首次 CI；Vue/容器与本地验收已经完成 |
+| M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 关注关系与关注流 |
 | M3 | Redis Cache-Aside、时间线、本地缓存/singleflight、限流、认证刷新/撤销策略 |
 | M4 | 同步业务事实 + 同事务 Outbox、RabbitMQ、独立 Worker、幂等/ACK/重试、通知与鉴权 SSE |
