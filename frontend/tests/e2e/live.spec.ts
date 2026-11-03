@@ -103,10 +103,22 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
     bobPage.once('dialog', dialog => dialog.accept())
     await bobPage.getByRole('button', { name: '删除评论', exact: true }).click()
     await expect(bobPage.locator('.comment-item')).toHaveCount(1)
+    // B follows A from A's video; the relation is directed and survives navigation.
+    const follow = bobPage.locator('.follow-button')
+    await expect(follow).toBeEnabled(); await follow.click()
+    await expect(follow).toHaveText('✓ 已关注'); await expect(follow).toHaveAttribute('aria-pressed', 'true')
+    expect(await (await bobPage.request.get(`/users/${alice.id}/follow`, { headers })).json()).toEqual({ following: true })
+    expect(await (await bobPage.request.get(`/users/${bob.id}/follow`, { headers: { Authorization: `Bearer ${alice.token}` } })).json()).toEqual({ following: false })
+    await bobPage.goto('/#/'); await bobPage.goto(`/#/videos/${published.id}`)
+    await expect(follow).toHaveText('✓ 已关注')
+    await follow.click()
+    await expect(follow).toHaveAttribute('aria-pressed', 'false'); await expect(follow).toBeEnabled()
+    expect(await (await bobPage.request.get(`/users/${alice.id}/follow`, { headers })).json()).toEqual({ following: false })
   } finally { await context.close() }
 
   await page.goto(`/#/videos/${published.id}`)
   await expect(page.getByText('2 人点赞', { exact: true })).toBeVisible()
+  await expect(page.locator('.follow-button')).toHaveCount(0) // authors cannot follow themselves
   page.once('dialog', dialog => dialog.accept())
   await page.getByRole('button', { name: '删除视频', exact: true }).click()
   await expect(page).toHaveURL(/#\/mine$/)

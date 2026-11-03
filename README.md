@@ -18,7 +18,7 @@
 - JPEG/PNG 封面上传（最大 5 MiB）、预览、默认封面与归属校验。
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
-- 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。页面入口与关注流尚未实现。
+- 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流尚未实现。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。Compose 已准备 Redis/RabbitMQ，Go 业务尚未接入；当前仍为单进程模块化应用。
 
@@ -323,7 +323,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系 API 已完成，接下来是作者关注按钮和关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系 API 与详情页关注按钮已完成，接下来是关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -411,4 +411,6 @@ Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400
 
 `follows(follower_id, followee_id, created_at)` 以 `(follower_id, followee_id)` 为主键防止重复关注，`idx_follows_followee_id` 支持反向查询，两个外键指向 `users(id)`，`CHECK (follower_id <> followee_id)` 在数据库层兜底禁止自关注。新库由 `scripts/schema.sql` 创建；已有库执行一次 `scripts/migrations/006_follows.sql`。
 
-默认测试用假驱动和仓储替身覆盖 SQL、参数顺序、错误翻译、业务规则和 25 个 HTTP 场景。设置 `GOSTREAM_TEST_MYSQL_DSN` 后，另运行 Repository 集成测试和端到端 HTTP 测试（注册登录、关注、幂等、拒绝情况、跨账号隔离、取消），运行方式见“测试与验证范围”。页面入口与关注流尚未实现。
+默认测试用假驱动和仓储替身覆盖 SQL、参数顺序、错误翻译、业务规则和 25 个 HTTP 场景。设置 `GOSTREAM_TEST_MYSQL_DSN` 后，另运行 Repository 集成测试和端到端 HTTP 测试（注册登录、关注、幂等、拒绝情况、跨账号隔离、取消），运行方式见“测试与验证范围”。
+
+详情页在作者信息下方提供关注按钮。游客点击先打开登录窗口，不发送请求；登录后用 GET 读取状态，点击发送 PUT 或 DELETE，成功后重新 GET，以后端结果更新按钮；作者本人看不到按钮；读取失败时禁用按钮并提供“重新读取关注状态”。切换视频或账号后忽略旧响应。Chromium 夹具测试覆盖这些交互和请求顺序；隔离 Compose 的真实浏览器测试验证双账号关注、返回页面后状态保持、取消关注和作者本人不显示按钮。关注流尚未实现。

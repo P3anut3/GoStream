@@ -3,7 +3,7 @@ import { test, expect, type Page, type Route } from '@playwright/test'
 const video = (id: number, author = 1) => ({ id, author_id: author, title: `测试作品 ${id}`, play_url: '/media/videos/a.mp4', cover_url: '/cover.svg', created_at: '2026-10-17T12:00:00+08:00', author_name: '测试作者', like_count: 0, liked: false })
 const ok = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 async function mockAPI(page: Page, override?: (route: Route, path: string, method: string) => Promise<boolean>) {
-  let liked = false, comments: any[] = []
+  let liked = false, following = false, comments: any[] = []
   await page.route('**/*', async route => {
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method()
     if (override && await override(route, path, method)) return
@@ -16,6 +16,10 @@ async function mockAPI(page: Page, override?: (route: Route, path: string, metho
     if (/^\/videos\/\d+\/like$/.test(path)) {
       if (method === 'GET') return ok(route, { like_count: liked ? 1 : 0, liked })
       liked = method === 'PUT'; return route.fulfill({ status: 204 })
+    }
+    if (/^\/users\/\d+\/follow$/.test(path)) {
+      if (method === 'GET') return ok(route, { following })
+      following = method === 'PUT'; return route.fulfill({ status: 204 })
     }
     if (/^\/videos\/\d+\/comments$/.test(path)) {
       if (method === 'POST') { const body = route.request().postDataJSON(); comments = [{ id: 1, video_id: 1, user_id: 1, content: body.content, created_at: '2026-10-17' }, ...comments]; return ok(route, comments[0], 201) }
@@ -135,6 +139,57 @@ test('mobile navigation remains usable and invalid cursor requires refresh', asy
   await expect(page.getByRole('button', { name: '请刷新列表', exact: true })).toBeDisabled()
   await expect(page.locator('#nav-mine')).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('author follow button: guests log in first, state comes from the server, own videos hide it', async ({ page }) => {
+  const calls: string[] = []
+  let following = false
+  await mockAPI(page, async (route, path, method) => {
+    if (path === '/videos/2' && method === 'GET') { await ok(route, video(2, 2)); return true }
+    if (path === '/users/2/follow') {
+      calls.push(method)
+      expect(route.request().headers().authorization).toBe('Bearer test-issued-token')
+      if (method === 'GET') await ok(route, { following })
+      else { following = method === 'PUT'; await route.fulfill({ status: 204 }) }
+      return true
+    }
+    return false
+  })
+  await page.goto('/#/videos/2')
+  await expect(page.getByText('登录后关注作者', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '+ 关注', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  expect(calls).toEqual([])
+  await page.getByLabel('用户名', { exact: true }).fill('alice'); await page.getByLabel('密码', { exact: true }).fill('test-password-123')
+  await page.locator('.auth-modal button[type="submit"]').click()
+  const follow = page.locator('.follow-button')
+  await expect(follow).toBeEnabled(); await expect(follow).toHaveText('+ 关注'); await expect(follow).toHaveAttribute('aria-pressed', 'false')
+  await follow.click()
+  await expect(follow).toHaveText('✓ 已关注'); await expect(follow).toHaveAttribute('aria-pressed', 'true'); await expect(follow).toBeEnabled()
+  await follow.click()
+  await expect(follow).toHaveAttribute('aria-pressed', 'false'); await expect(follow).toBeEnabled(); await expect(follow).toHaveText('+ 关注')
+  // Every change is confirmed by a fresh GET instead of flipping the button locally.
+  expect(calls).toEqual(['GET', 'PUT', 'GET', 'DELETE', 'GET'])
+  await page.goto('/#/videos/1')
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('测试作品 1')
+  await expect(page.locator('.follow-button')).toHaveCount(0)
+})
+
+test('follow status failure keeps the button disabled until a retry succeeds', async ({ page }) => {
+  let attempts = 0
+  await mockAPI(page, async (route, path, method) => {
+    if (path === '/videos/2' && method === 'GET') { await ok(route, video(2, 2)); return true }
+    if (path === '/users/2/follow' && method === 'GET') {
+      attempts++; await ok(route, attempts === 1 ? { error: '查询关注状态失败' } : { following: true }, attempts === 1 ? 500 : 200); return true
+    }
+    return false
+  })
+  await page.goto('/'); await login(page); await page.goto('/#/videos/2')
+  await expect(page.getByText('查询关注状态失败', { exact: true })).toBeVisible()
+  await expect(page.locator('.follow-button')).toBeDisabled()
+  await page.getByRole('button', { name: '重新读取关注状态', exact: true }).click()
+  await expect(page.locator('.follow-button')).toHaveText('✓ 已关注')
+  await expect(page.getByText('查询关注状态失败', { exact: true })).toHaveCount(0)
 })
 
 test('401 clears expired identity and foreign video exposes no delete action', async ({ page }) => {

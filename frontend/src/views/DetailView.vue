@@ -4,23 +4,24 @@ import { useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from '../stores/session'
 import { errorMessage } from '../api/client'
 import { mediaURL, formatDate } from '../lib/media'
-import type { Video, LikeStatus } from '../types'
+import type { Video, LikeStatus, FollowStatus } from '../types'
 import CommentSection from '../components/CommentSection.vue'
 const route = useRoute(), router = useRouter(), session = useSessionStore()
 const video = ref<Video | null>(null), loading = ref(false), error = ref(''), playbackError = ref('')
 const likes = ref<LikeStatus | null>(null), likeLoading = ref(false), likeBusy = ref(false), likeError = ref('')
+const follow = ref<FollowStatus | null>(null), followLoading = ref(false), followBusy = ref(false), followError = ref('')
 const deleteBusy = ref(false), deleteError = ref('')
 const player = ref<HTMLVideoElement>(), owned = computed(() => !!video.value && video.value.author_id === session.user?.id)
 const id = computed(() => String(route.params.id)), url = computed(() => mediaURL(video.value?.play_url))
-let sequence = 0, likeSequence = 0
+let sequence = 0, likeSequence = 0, followSequence = 0
 async function load() {
-  const seq = ++sequence; likeSequence++; player.value?.pause()
-  video.value = null; likes.value = null; loading.value = true; error.value = ''; playbackError.value = ''; deleteError.value = ''
+  const seq = ++sequence; likeSequence++; followSequence++; player.value?.pause()
+  video.value = null; likes.value = null; follow.value = null; loading.value = true; error.value = ''; playbackError.value = ''; deleteError.value = ''; followError.value = ''
   if (!/^[1-9][0-9]*$/.test(id.value)) { loading.value = false; error.value = '视频 ID 必须是正整数'; return }
   try {
     const result = await session.call<Video>(`/videos/${encodeURIComponent(id.value)}`)
     if (seq !== sequence) return
-    video.value = result; void loadLikes()
+    video.value = result; void loadLikes(); void loadFollow()
   } catch (cause) { if (seq === sequence) error.value = errorMessage(cause) }
   finally { if (seq === sequence) loading.value = false }
 }
@@ -46,6 +47,29 @@ async function toggleLike() {
   } catch (cause) { if (target === id.value && revision === session.revision) likeError.value = errorMessage(cause) }
   finally { likeBusy.value = false }
 }
+async function loadFollow() {
+  const seq = ++followSequence, revision = session.revision, author = video.value?.author_id
+  follow.value = null; followError.value = ''; followLoading.value = false
+  // 游客点击时先登录；作者本人不能关注自己，不查询。
+  if (!session.token || !author || owned.value) return
+  followLoading.value = true
+  try {
+    const result = await session.call<FollowStatus>(`/users/${author}/follow`, {}, 'required')
+    if (seq === followSequence && revision === session.revision) follow.value = result
+  } catch (cause) { if (seq === followSequence && revision === session.revision) followError.value = errorMessage(cause) }
+  finally { if (seq === followSequence) followLoading.value = false }
+}
+async function toggleFollow() {
+  if (!session.token) { session.requireLogin(); return }
+  if (followBusy.value || followLoading.value || !follow.value || !video.value || owned.value) return
+  const author = video.value.author_id, target = id.value, revision = session.revision
+  followBusy.value = true; followError.value = ''
+  try {
+    await session.call(`/users/${author}/follow`, { method: follow.value.following ? 'DELETE' : 'PUT' }, 'required')
+    if (target === id.value && revision === session.revision) await loadFollow()
+  } catch (cause) { if (target === id.value && revision === session.revision) followError.value = errorMessage(cause) }
+  finally { followBusy.value = false }
+}
 async function remove() {
   if (!video.value || !owned.value || deleteBusy.value || !window.confirm('删除这个视频？记录删除后无法恢复，已上传文件仍会保留。')) return
   const target = video.value.id, revision = session.revision
@@ -57,8 +81,8 @@ async function remove() {
   finally { deleteBusy.value = false }
 }
 watch(id, load, { immediate: true })
-watch(() => session.revision, () => { likes.value = null; void loadLikes() })
-onUnmounted(() => { sequence++; likeSequence++; player.value?.pause() })
+watch(() => session.revision, () => { likes.value = null; void loadLikes(); void loadFollow() })
+onUnmounted(() => { sequence++; likeSequence++; followSequence++; player.value?.pause() })
 </script>
 <template>
   <div class="back-row"><RouterLink class="text-button" to="/">← 返回视频库</RouterLink></div>
@@ -66,7 +90,8 @@ onUnmounted(() => { sequence++; likeSequence++; player.value?.pause() })
   <div v-if="error" class="empty-state" role="alert">{{ error }} <button class="button" @click="load">重试</button></div>
   <article v-if="video" class="page-panel video-detail">
     <video ref="player" id="detail-player" :src="url || undefined" :poster="mediaURL(video.cover_url) || '/cover.svg'" controls playsinline preload="metadata" @error="playbackError = '视频暂时无法播放，请检查文件或尝试打开原视频。'"></video>
-    <div class="video-detail-content"><span class="eyebrow">VIDEO / {{ video.id }}</span><h1>{{ video.title }}</h1><p class="muted">创作者 {{ video.author_id }} · {{ formatDate(video.created_at) }}</p><p class="form-message" role="status">{{ playbackError || (!url ? '视频地址格式不受支持' : '') }}</p>
+    <div class="video-detail-content"><span class="eyebrow">VIDEO / {{ video.id }}</span><h1>{{ video.title }}</h1><p class="muted">创作者 {{ video.author_id }} · {{ formatDate(video.created_at) }}</p>
+      <div v-if="!owned" class="follow-controls"><button class="button follow-button" :class="{ following: follow?.following }" :aria-pressed="!!follow?.following" :disabled="followBusy || followLoading || (!!session.token && !follow)" @click="toggleFollow">{{ follow?.following ? '✓ 已关注' : '+ 关注' }}</button><span aria-live="polite">{{ followLoading ? '正在读取关注状态……' : session.token ? '' : '登录后关注作者' }}</span><button v-if="followError && !follow && !followLoading" class="text-button" @click="loadFollow">重新读取关注状态</button></div><p v-if="!owned" class="form-message" role="alert">{{ followError }}</p><p class="form-message" role="status">{{ playbackError || (!url ? '视频地址格式不受支持' : '') }}</p>
       <div class="like-controls"><button class="button like-button" :class="{ liked: likes?.liked }" :aria-pressed="!!likes?.liked" :disabled="likeBusy || likeLoading || (!!session.token && !likes)" @click="toggleLike">{{ likes?.liked ? '♥ 已点赞' : '♡ 点赞' }}</button><span aria-live="polite">{{ likeLoading ? '正在读取点赞……' : likes ? `${likes.like_count} 人点赞` : '登录后查看点赞数量' }}</span><button class="text-button" :disabled="likeLoading || likeBusy || !session.token" @click="loadLikes">刷新点赞</button></div><p class="form-message" role="alert">{{ likeError }}</p>
       <div class="detail-actions"><a v-if="url" class="button" :href="url" target="_blank" rel="noopener noreferrer">打开原视频 ↗</a><button v-if="owned" class="button danger" :disabled="deleteBusy" @click="remove">{{ deleteBusy ? '正在删除……' : '删除视频' }}</button></div><p class="form-message" role="alert">{{ deleteError }}</p><p class="fine-print">删除操作仅移除视频记录，当前不会删除已上传文件。</p>
       <CommentSection :key="video.id" :video-id="video.id" />

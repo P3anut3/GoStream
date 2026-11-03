@@ -14,6 +14,7 @@ export interface Video {
 export interface FeedResponse { videos: Video[]; next_cursor: string; has_more: boolean }
 export interface VideoPage { videos: Video[]; page: number; page_size: number }
 export interface LikeStatus { like_count: number; liked: boolean }
+export interface FollowStatus { following: boolean }
 export interface Comment { id: number; user_id: number; video_id: number; content: string; created_at: string }
 export interface CommentPage { comments: Comment[]; page: number; page_size: number; video_id: number }
 export interface VideoUpload { play_url: string; saved_name: string; filename: string; size: number }

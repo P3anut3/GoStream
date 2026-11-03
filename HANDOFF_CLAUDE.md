@@ -58,7 +58,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息 | `internal/feed`；只有 MySQL 最新流，无缓存、关注流或推荐模型 |
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
-| 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；页面入口和关注流待做 |
+| 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；详情页关注按钮已完成；关注流待做 |
 | 上传清理 | pending/published/deleting 生命周期；24 小时未发布上传的手工预览/执行清理 | `cmd/cleanup-uploads`、`upload_cleanup*`；行锁协调发布与清理、失败重试，无自动定时调度 |
 | 配置与健康 | YAML+env 覆盖与校验；healthz/readyz；SIGINT/SIGTERM 退出 | `internal/config`、`internal/health`；readyz 对 DB Ping 最长 1 秒 |
 | 前端 | Vue/TS/Pinia/Router/Vite；注册登录、发布播放、Feed、我的作品、点赞评论、作者删除 | `frontend/src`；迁移及真实浏览器验收已完成 |
@@ -255,7 +255,7 @@ try {
 
 ## 11. 下一步：M2 关注关系与关注流
 
-进度（2026-11-02）：表设计（006 迁移）与关注/取消/状态 API 已完成并提交，含单元、HTTP、真实 MySQL 集成和端到端测试；状态码已定稿（PUT 204/400/404，DELETE 一律 204，GET 200/404）。下一步是作者关注按钮——已有的 Windows 库和 Compose 数据卷要先执行 006 迁移，须用户确认——然后是关注流。
+进度（2026-11-03）：表设计（006 迁移）与关注/取消/状态 API 已完成并提交，含单元、HTTP、真实 MySQL 集成和端到端测试；状态码已定稿（PUT 204/400/404，DELETE 一律 204，GET 200/404）。详情页关注按钮已完成并提交：Chromium 夹具 8 项通过，隔离 Compose 真实浏览器验收通过。下一步是第 7 步关注流（GET /feed/following）。用户的 Windows 库和 gostream-dev 数据卷还没有执行 006，须用户确认后再执行；gostream-api:dev 已按新代码重建，dev 栈下次重建 API 容器时会用到它。
 
 以下为原设计；关系 API 已按此实现，关注流仍待实现。先按小步骤指导，不要一次写完 M2～M6。
 
