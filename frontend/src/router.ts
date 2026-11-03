@@ -7,6 +7,7 @@ export const router = createRouter({
   routes: [
     { path: '/', component: LibraryView, meta: { title: '视频库' } },
     { path: '/mine', component: LibraryView, meta: { title: '我的视频', auth: true } },
+    { path: '/following', component: LibraryView, meta: { title: '关注', auth: true } },
     { path: '/publish', component: () => import('./views/PublishView.vue'), meta: { title: '发布视频', auth: true } },
     { path: '/account', component: () => import('./views/AccountView.vue'), meta: { title: '当前用户', auth: true } },
     { path: '/videos/:id', component: () => import('./views/DetailView.vue'), meta: { title: '视频详情' } },

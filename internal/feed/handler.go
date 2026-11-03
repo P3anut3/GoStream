@@ -46,28 +46,61 @@ func (h *Handler) ListLatest(c *gin.Context) {
 		viewerID,
 	)
 	//3、将业务错误转换成 HTTP响应
-	if errors.Is(err, ErrInvalidLimit) {
+	if writeListError(c, err) {
+		return
+	}
+	//	4、返回 Service 已组装好的分页结果
+	c.JSON(http.StatusOK, result)
+}
+
+// ListFollowing 处理 GET /feed/following：必须登录，只返回当前用户关注的作者的作品。
+func (h *Handler) ListFollowing(c *gin.Context) {
+	var req ListRequest
+	if err := c.ShouldBindQuery(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code":  "INVALID_ARGUMENT",
+			"error": "查询参数格式错误",
+		})
+		return
+	}
+	value, exists := c.Get("userID")
+	viewerID, ok := value.(uint64)
+	if !exists || !ok || viewerID == 0 {
+		// 路由必须挂 JWT 中间件；走到这里说明装配有误，不能当成游客继续。
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "error": "请求身份异常"})
+		return
+	}
+	// 每个用户的关注流都不同，禁止共享 HTTP 缓存。
+	c.Header("Cache-Control", "private, no-store")
+	c.Header("Vary", "Authorization")
+	result, err := h.service.ListFollowing(c.Request.Context(), req.Limit, req.Cursor, viewerID)
+	if writeListError(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// writeListError 把两种视频流共用的分页错误转成 HTTP 响应；没有错误时返回 false。
+func writeListError(c *gin.Context, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, ErrInvalidLimit):
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":  "INVALID_ARGUMENT",
 			"error": err.Error(),
 		})
-		return
-	}
-	if errors.Is(err, ErrInvalidCursor) {
+	case errors.Is(err, ErrInvalidCursor):
 		c.JSON(http.StatusBadRequest, gin.H{
 			"code":  "INVALID_CURSOR",
 			"error": "视频流游标无效，请刷新列表",
 		})
-		return
-	}
-	if err != nil {
+	default:
 		log.Printf("查询视频流失败: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"code":  "INTERNAL_ERROR",
 			"error": "视频流查询失败",
 		})
-		return
 	}
-	//	4、返回 Service 已组装好的分页结果
-	c.JSON(http.StatusOK, result)
+	return true
 }

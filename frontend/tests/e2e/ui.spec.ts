@@ -8,6 +8,7 @@ async function mockAPI(page: Page, override?: (route: Route, path: string, metho
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method()
     if (override && await override(route, path, method)) return
     if (path === '/feed') return ok(route, { videos: [video(1)], next_cursor: '', has_more: false })
+    if (path === '/feed/following') return ok(route, { videos: [], next_cursor: '', has_more: false })
     if (path === '/users' && method === 'POST') return ok(route, { id: 1, username: 'alice' }, 201)
     if (path === '/login') return ok(route, { id: 1, username: 'alice', token: 'test-issued-token' })
     if (path === '/me') return ok(route, { id: 1, username: 'alice' })
@@ -190,6 +191,39 @@ test('follow status failure keeps the button disabled until a retry succeeds', a
   await page.getByRole('button', { name: '重新读取关注状态', exact: true }).click()
   await expect(page.locator('.follow-button')).toHaveText('✓ 已关注')
   await expect(page.getByText('查询关注状态失败', { exact: true })).toHaveCount(0)
+})
+
+test('following tab requires login and pages with its own cursor, never sent to the latest feed', async ({ page }) => {
+  const requests: string[] = []
+  await mockAPI(page, async (route, path) => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor') || ''
+    if (path === '/feed/following') {
+      expect(route.request().headers().authorization).toBe('Bearer test-issued-token')
+      requests.push(`following:${cursor}`)
+      await ok(route, cursor ? { videos: [video(3, 2)], next_cursor: '', has_more: false } : { videos: [video(4, 2)], next_cursor: 'following-cursor', has_more: true })
+      return true
+    }
+    if (path === '/feed') requests.push(`latest:${cursor}`)
+    return false
+  })
+  await page.goto('/#/following')
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByLabel('用户名', { exact: true }).fill('alice'); await page.getByLabel('密码', { exact: true }).fill('test-password-123')
+  await page.locator('.auth-modal button[type="submit"]').click()
+  await expect(page).toHaveURL(/#\/following$/)
+  await expect(page.getByRole('heading', { name: '关注', exact: true })).toBeVisible()
+  await expect(page.locator('.video-card')).toHaveCount(1)
+  await page.getByRole('button', { name: '加载更多', exact: true }).click()
+  await expect(page.locator('.video-card')).toHaveCount(2)
+  await expect(page.getByRole('button', { name: '没有更多视频了' })).toBeDisabled()
+  await page.locator('#nav-library').click()
+  await expect(page.getByRole('heading', { name: '视频库', exact: true })).toBeVisible()
+  await expect(page.locator('.video-card')).toHaveCount(1)
+  await page.locator('#nav-following').click()
+  await expect(page.locator('.video-card')).toHaveCount(1)
+  // The following cursor only goes back to /feed/following, and switching tabs restarts each feed.
+  expect(requests.filter(r => r.startsWith('following:')).slice(-3)).toEqual(['following:', 'following:following-cursor', 'following:'])
+  expect(requests.filter(r => r.startsWith('latest:')).every(r => r === 'latest:')).toBe(true)
 })
 
 test('401 clears expired identity and foreign video exposes no delete action', async ({ page }) => {

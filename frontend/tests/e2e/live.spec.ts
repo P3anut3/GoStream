@@ -109,11 +109,27 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
     await expect(follow).toHaveText('✓ 已关注'); await expect(follow).toHaveAttribute('aria-pressed', 'true')
     expect(await (await bobPage.request.get(`/users/${alice.id}/follow`, { headers })).json()).toEqual({ following: true })
     expect(await (await bobPage.request.get(`/users/${bob.id}/follow`, { headers: { Authorization: `Bearer ${alice.token}` } })).json()).toEqual({ following: false })
-    await bobPage.goto('/#/'); await bobPage.goto(`/#/videos/${published.id}`)
+    // B publishes one video; it is in the latest feed but not in B's own following feed.
+    const bobUpload = await bobPage.request.post('/uploads/videos', { headers, multipart: { file: { name: 'bob.mp4', mimeType: 'video/mp4', buffer: bytes } } })
+    expect(bobUpload.status()).toBe(200)
+    expect((await bobPage.request.post('/videos', { headers, data: { title: '账号 B 的作品', play_url: (await bobUpload.json()).play_url, cover_url: '/cover.svg' } })).status()).toBe(201)
+    await bobPage.locator('#nav-following').click()
+    await expect(bobPage.getByRole('heading', { name: '关注', exact: true })).toBeVisible()
+    await expect(bobPage.locator('.video-card')).toHaveCount(6)
+    await bobPage.getByRole('button', { name: '加载更多', exact: true }).click(); await expect(bobPage.locator('.video-card')).toHaveCount(7)
+    await expect(bobPage.getByRole('button', { name: '没有更多视频了' })).toBeDisabled()
+    await expect(bobPage.getByText('账号 B 的作品', { exact: true })).toHaveCount(0)
+    await bobPage.locator('#nav-library').click()
+    await expect(bobPage.locator('.card-title').first()).toHaveText('账号 B 的作品')
+    await bobPage.goto(`/#/videos/${published.id}`)
     await expect(follow).toHaveText('✓ 已关注')
     await follow.click()
     await expect(follow).toHaveAttribute('aria-pressed', 'false'); await expect(follow).toBeEnabled()
     expect(await (await bobPage.request.get(`/users/${alice.id}/follow`, { headers })).json()).toEqual({ following: false })
+    // After unfollowing, a fresh following feed is empty.
+    await bobPage.locator('#nav-following').click()
+    await expect(bobPage.locator('.empty-state')).toContainText('关注的作者还没有作品')
+    await expect(bobPage.locator('.video-card')).toHaveCount(0)
   } finally { await context.close() }
 
   await page.goto(`/#/videos/${published.id}`)

@@ -18,7 +18,7 @@
 - JPEG/PNG 封面上传（最大 5 MiB）、预览、默认封面与归属校验。
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
-- 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流尚未实现。
+- 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流 `GET /feed/following` 与视频库“关注”标签页只展示已关注作者的作品。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。Compose 已准备 Redis/RabbitMQ，Go 业务尚未接入；当前仍为单进程模块化应用。
 
@@ -171,6 +171,7 @@ go run ./cmd/server
 | GET | `/videos/:id` | 无 | 200，视频元数据 |
 | GET | `/videos` | 无 | 200，分页参数及视频数组 |
 | GET | `/feed` | 可选 Bearer token；提供时须有效 | 200，最新视频及作者/点赞信息、字符串游标和 `has_more` |
+| GET | `/feed/following` | Bearer token | 200，仅含已关注作者的作品，带作者/点赞信息、关注流游标和 `has_more` |
 | GET | `/me/videos` | Bearer token | 200，仅当前用户的视频及分页参数 |
 | DELETE | `/videos/:id` | Bearer token | 204，无响应体，仅作者可删除 |
 | GET | `/videos/:id/like` | Bearer token | 200，`like_count` 和当前用户的 `liked` |
@@ -279,13 +280,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系的 MySQL 测试不读取 `.env`，只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系与关注流的 MySQL 测试不读取 `.env`，只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -323,7 +324,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系 API 与详情页关注按钮已完成，接下来是关注流，随后是 Redis 缓存和 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成，下一阶段是 M3 Redis 缓存，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -413,4 +414,6 @@ Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400
 
 默认测试用假驱动和仓储替身覆盖 SQL、参数顺序、错误翻译、业务规则和 25 个 HTTP 场景。设置 `GOSTREAM_TEST_MYSQL_DSN` 后，另运行 Repository 集成测试和端到端 HTTP 测试（注册登录、关注、幂等、拒绝情况、跨账号隔离、取消），运行方式见“测试与验证范围”。
 
-详情页在作者信息下方提供关注按钮。游客点击先打开登录窗口，不发送请求；登录后用 GET 读取状态，点击发送 PUT 或 DELETE，成功后重新 GET，以后端结果更新按钮；作者本人看不到按钮；读取失败时禁用按钮并提供“重新读取关注状态”。切换视频或账号后忽略旧响应。Chromium 夹具测试覆盖这些交互和请求顺序；隔离 Compose 的真实浏览器测试验证双账号关注、返回页面后状态保持、取消关注和作者本人不显示按钮。关注流尚未实现。
+详情页在作者信息下方提供关注按钮。游客点击先打开登录窗口，不发送请求；登录后用 GET 读取状态，点击发送 PUT 或 DELETE，成功后重新 GET，以后端结果更新按钮；作者本人看不到按钮；读取失败时禁用按钮并提供“重新读取关注状态”。切换视频或账号后忽略旧响应。Chromium 夹具测试覆盖这些交互和请求顺序；隔离 Compose 的真实浏览器测试验证双账号关注、返回页面后状态保持、取消关注和作者本人不显示按钮。
+
+`GET /feed/following` 要求 Bearer token，只返回当前用户关注的作者的作品；排序、limit+1 和批量作者/点赞补全与最新流相同。游标在签名内记录流类型，最新流游标不能续读关注流，反之亦然，误用返回 400 `INVALID_CURSOR`；游标不含身份，关注者始终来自 JWT。续读按 (created_at, id) 位置进行，没有快照：翻页期间新关注的作者的旧作品可能出现在后续页，已取关作者的剩余作品不再出现。视频库的“关注”标签页需要登录，使用独立的游标，切换标签或账号时重新加载。Go 单元测试覆盖游标类型绑定、分页与错误映射；设置 `GOSTREAM_TEST_MYSQL_DSN` 后，集成和端到端测试验证筛选、同一时间边界不越界、有向关系、取关后不可见和游标不能混用；隔离 Compose 真实浏览器测试验证关注页分页、自己的作品不进入关注流以及取关后关注页为空。

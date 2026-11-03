@@ -17,6 +17,7 @@ watch(() => session.token, token => { if (!token && route.meta.auth) void router
     <p class="nav-label">个人工作空间</p>
     <nav aria-label="主导航">
       <RouterLink id="nav-library" class="nav-item" exact-active-class="active" to="/"><span>▦</span>视频库<span class="arrow">↗</span></RouterLink>
+      <RouterLink id="nav-following" class="nav-item" active-class="active" to="/following"><span>☆</span>关注</RouterLink>
       <RouterLink id="nav-mine" class="nav-item" active-class="active" to="/mine"><span>▷</span>我的视频</RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/publish"><span>＋</span>发布视频</RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/account"><span>◎</span>当前用户</RouterLink>

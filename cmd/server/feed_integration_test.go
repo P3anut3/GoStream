@@ -171,7 +171,7 @@ func TestFeedHTTPMySQLIntegration(t *testing.T) {
 	get("limit=2&cursor="+url.QueryEscape(first.NextCursor), []uint64{302, 301}, false, 0)
 	get("limit=2", []uint64{305, 304}, true, 0)
 	get("limit=50", []uint64{305, 304, 303, 302, 301}, false, 7)
-	older, err := newTestFeedCursor(t).Encode(feed.Position{CreatedAt: stamp.Add(-time.Minute), ID: 1})
+	older, err := newTestFeedCursor(t).Encode(feed.KindLatest, feed.Position{CreatedAt: stamp.Add(-time.Minute), ID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}

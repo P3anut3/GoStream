@@ -151,3 +151,64 @@ func (r *feedRows) Next(dest []driver.Value) error {
 	r.values = r.values[1:]
 	return nil
 }
+
+func TestRepositoryListFollowing(t *testing.T) {
+	stamp := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	failure := errors.New("database unavailable")
+	for _, tc := range []struct {
+		name     string
+		position *Position
+		failure  error
+	}{
+		{name: "first_batch"},
+		{name: "continue_with_time_and_id", position: &Position{CreatedAt: stamp, ID: 24}},
+		{name: "database_error_preserved", failure: failure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.WithValue(context.Background(), feedContextKey{}, "following")
+			calls := 0
+			pool := sql.OpenDB(feedConnector{query: func(got context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+				calls++
+				if got != ctx {
+					t.Error("request context did not reach database")
+				}
+				compact := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(query, "`", ""), " ", ""))
+				for _, part := range []string{"fromvideosasv", "joinfollowsasfonf.followee_id=v.author_id", "f.follower_id=?", "orderbyv.created_atdesc,v.iddesc"} {
+					if !strings.Contains(compact, part) {
+						t.Errorf("following query is missing %q: %s", part, query)
+					}
+				}
+				want := []any{int64(7), int64(11)}
+				if tc.position != nil {
+					// The outer parentheses keep the cursor's OR inside the follower filter.
+					if !strings.Contains(compact, "((v.created_at<?)or(v.created_at=?andv.id<?))") {
+						t.Errorf("missing parenthesized composite boundary: %s", query)
+					}
+					want = []any{int64(7), stamp, stamp, int64(24), int64(11)}
+				}
+				values := make([]any, len(args))
+				for i := range args {
+					values[i] = args[i].Value
+				}
+				if !reflect.DeepEqual(values, want) {
+					t.Errorf("bound arguments = %v, want %v", values, want)
+				}
+				if tc.failure != nil {
+					return nil, tc.failure
+				}
+				return &feedRows{values: [][]driver.Value{{int64(23), int64(2), "fixture", "/media/videos/a.mp4", "/cover.svg", stamp}}}, nil
+			}})
+			defer pool.Close()
+			items, err := (&GORMRepository{DB: database.WrapSQL(pool)}).ListFollowing(ctx, 7, tc.position, 11)
+			if !errors.Is(err, tc.failure) {
+				t.Fatalf("error = %v, want %v", err, tc.failure)
+			}
+			if calls != 1 {
+				t.Errorf("database calls = %d, want 1", calls)
+			}
+			if err == nil && (len(items) != 1 || items[0].ID != 23 || items[0].AuthorID != 2) {
+				t.Errorf("incorrect row mapping: %+v", items)
+			}
+		})
+	}
+}

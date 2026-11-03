@@ -11,7 +11,7 @@
 | 用户与认证 | 注册、登录、当前用户、bcrypt、JWT 签名/校验、写接口身份来源 | internal/user、internal/auth | 没有 Refresh Token、服务端撤销、资料编辑；页面退出只清除内存 token |
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
-| 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | 只有 MySQL 最新流；没有关注流、Redis 时间线、热榜或推荐模型 |
+| 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；没有 Redis 时间线、热榜或推荐模型 |
 | 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入；没有通知、已赞列表或 @ 提及 |
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
@@ -44,7 +44,7 @@
 
 | 业务差距 | 参考实现 | 我们的优先级 |
 | --- | --- | --- |
-| 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 高：关注/取关/状态已实现；粉丝列表/计数与关注流待做 |
+| 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 关注/取关/状态与关注流已实现；粉丝列表/计数待做 |
 | 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果 |
 | 分片、进度查询、合并、恢复上传 | video/chunk_handler.go | 高：完整技术栈对齐的一部分，但在 Redis 基础后做 |
 | Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 中高：放在 Redis 阶段，明确过期/刷新/撤销语义 |
@@ -79,7 +79,7 @@ GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先
 | 阶段 | 重点任务 | 必须留下的验收结果 |
 | --- | --- | --- |
 | M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
-| M2：关注与关注流 | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
+| M2：关注与关注流（完成） | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
 | M3：缓存与认证增强 | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
 | M4：可靠事件与通知 | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
 | M5：分片续传 | 用户绑定的上传会话、Redis 状态、分片校验/幂等、合并、spark-md5、过期清理 | 中断后只补缺失分片，跨账号不能接管；合并后仍走 uploads → Publish 原有归属与生命周期规则 |

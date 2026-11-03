@@ -95,6 +95,7 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	router.GET("/healthz", health.Live)
 	router.GET("/readyz", health.Ready(db))
 	router.GET("/feed", auth.OptionalJWTAuth(secret), feedHandler.ListLatest)
+	router.GET("/feed/following", jwt, feedHandler.ListFollowing)
 	router.POST("/users", users.CreateUser)
 	router.POST("/login", users.Login)
 	router.GET("/me", jwt, users.Me)

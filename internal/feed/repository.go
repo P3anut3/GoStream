@@ -29,6 +29,28 @@ func (r *GORMRepository) ListLatest(ctx context.Context, position *Position, lim
 	return items, nil
 }
 
+// ListFollowing 只取 viewerID 关注的作者的作品，排序和续读条件与最新流相同。
+func (r *GORMRepository) ListFollowing(ctx context.Context, viewerID uint64, position *Position, limit int) ([]FeedItem, error) {
+	items := make([]FeedItem, 0)
+	query := r.DB.WithContext(ctx).Table("videos AS v").
+		Select("v.id,v.author_id,v.title,v.play_url,v.cover_url,v.created_at").
+		Joins("JOIN follows AS f ON f.followee_id = v.author_id").
+		Where("f.follower_id = ?", viewerID).
+		Order("v.created_at desc").
+		Order("v.id desc").
+		Limit(limit)
+
+	if position != nil {
+		// 外层括号不能省：AND 比 OR 优先，漏掉括号会让 OR 后半段绕过上面的关注者条件。
+		query = query.Where("((v.created_at < ?) OR (v.created_at = ? AND v.id < ?))", position.CreatedAt, position.CreatedAt, position.ID)
+	}
+
+	if err := query.Find(&items).Error; err != nil {
+		return nil, fmt.Errorf("查询关注流失败: %w", err)
+	}
+	return items, nil
+}
+
 // LoadMetadata 用两次批量查询补全整批作品，避免逐条查询产生 N+1。
 func (r *GORMRepository) LoadMetadata(ctx context.Context, videoIDs, authorIDs []uint64, viewerID uint64) (Metadata, error) {
 	result := Metadata{Authors: make(map[uint64]string), Likes: make(map[uint64]LikeSummary)}

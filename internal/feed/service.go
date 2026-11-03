@@ -6,6 +6,7 @@ import (
 
 type Repository interface {
 	ListLatest(ctx context.Context, position *Position, limit int) ([]FeedItem, error)
+	ListFollowing(ctx context.Context, viewerID uint64, position *Position, limit int) ([]FeedItem, error)
 	LoadMetadata(ctx context.Context, videoIDs, authorIDs []uint64, viewerID uint64) (Metadata, error)
 }
 
@@ -27,7 +28,21 @@ func (s *Service) ListLatest(ctx context.Context, limit int, token string) (List
 
 // ListLatestForViewer 使用经过认证的浏览者身份补全个人状态；0 表示游客。
 func (s *Service) ListLatestForViewer(ctx context.Context, limit int, token string, viewerID uint64) (ListResponse, error) {
-	// 1、规范化没批条数
+	return s.list(ctx, KindLatest, limit, token, viewerID, func(position *Position, size int) ([]FeedItem, error) {
+		return s.repository.ListLatest(ctx, position, size)
+	})
+}
+
+// ListFollowing 只返回 viewerID 关注的作者的作品；viewerID 必须来自已验证的 JWT。
+func (s *Service) ListFollowing(ctx context.Context, limit int, token string, viewerID uint64) (ListResponse, error) {
+	return s.list(ctx, KindFollowing, limit, token, viewerID, func(position *Position, size int) ([]FeedItem, error) {
+		return s.repository.ListFollowing(ctx, viewerID, position, size)
+	})
+}
+
+// list 是各种视频流共用的分页流程；fetch 只决定"从哪里取作品"，其余步骤完全相同。
+func (s *Service) list(ctx context.Context, kind Kind, limit int, token string, viewerID uint64, fetch func(position *Position, size int) ([]FeedItem, error)) (ListResponse, error) {
+	// 1、规范化每批条数
 	if limit < 0 {
 		return ListResponse{}, ErrInvalidLimit
 	}
@@ -37,14 +52,14 @@ func (s *Service) ListLatestForViewer(ctx context.Context, limit int, token stri
 	if limit > 50 {
 		limit = 50
 	}
-	// 2、将前端传回的字符串 还原成查询位置
-	position, err := s.cursor.Decode(token)
+	// 2、将前端传回的字符串还原成查询位置；游标必须属于当前这种流
+	position, err := s.cursor.Decode(kind, token)
 	if err != nil {
 		return ListResponse{}, ErrInvalidCursor
 	}
 
 	// 3、多查询一条，用于判断后面是否还有数据
-	items, err := s.repository.ListLatest(ctx, position, limit+1)
+	items, err := fetch(position, limit+1)
 	if err != nil {
 		return ListResponse{}, err
 	}
@@ -81,10 +96,10 @@ func (s *Service) ListLatestForViewer(ctx context.Context, limit int, token stri
 		Videos:  items,
 		HasMore: hasMore,
 	}
-	// 5、用实际返回的最后一条视频，生成下一游标
+	// 5、用实际返回的最后一条视频，生成同一种流的下一游标
 	if hasMore {
 		last := items[len(items)-1]
-		nextCursor, err := s.cursor.Encode(Position{
+		nextCursor, err := s.cursor.Encode(kind, Position{
 			CreatedAt: last.CreatedAt,
 			ID:        last.ID,
 		})
