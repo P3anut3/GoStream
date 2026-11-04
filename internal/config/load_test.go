@@ -101,6 +101,40 @@ storage:
 	}
 }
 
+func TestLoadRedisIsOptionalAndPasswordComesFromEnvironment(t *testing.T) {
+	t.Setenv("GOSTREAM_DSN", "test-user:test-password@tcp(127.0.0.1:13306)/config_test")
+	t.Setenv("JWT_SECRET", strings.Repeat("j", 32))
+	t.Setenv("GOSTREAM_FEED_CURSOR_SECRET", strings.Repeat("f", 32))
+	for _, key := range []string{"GOSTREAM_HTTP_ADDR", "GOSTREAM_VIDEO_DIR", "GOSTREAM_COVER_DIR", "GOSTREAM_REDIS_ADDR", "GOSTREAM_REDIS_PASSWORD"} {
+		t.Setenv(key, "temporary")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := "http:\n  addr: \"127.0.0.1:8080\"\nstorage:\n  video_dir: \"v\"\n  cover_dir: \"c\"\n"
+	// Without a redis section or environment the cache stays disabled.
+	cfg, err := Load(writeConfigFixture(t, base))
+	if err != nil || cfg.Redis != (RedisConfig{}) {
+		t.Fatalf("Redis must be optional and disabled by default: %+v, %v", cfg.Redis, err)
+	}
+	// The YAML address is used, and the environment enables or overrides it.
+	cfg, err = Load(writeConfigFixture(t, base+"redis:\n  addr: \"127.0.0.1:16379\"\n"))
+	if err != nil || cfg.Redis.Addr != "127.0.0.1:16379" {
+		t.Fatalf("YAML Redis address not loaded: %+v, %v", cfg.Redis, err)
+	}
+	t.Setenv("GOSTREAM_REDIS_ADDR", "redis:6379")
+	t.Setenv("GOSTREAM_REDIS_PASSWORD", "redis-test-password")
+	cfg, err = Load(writeConfigFixture(t, base+"redis:\n  addr: \"\"\n"))
+	if err != nil || cfg.Redis.Addr != "redis:6379" || cfg.Redis.Password != "redis-test-password" {
+		t.Fatalf("environment must enable Redis and supply its password: %+v, %v", cfg.Redis, err)
+	}
+	// A password written into YAML is rejected instead of silently used.
+	cfg, err = Load(writeConfigFixture(t, base+"redis:\n  addr: \"redis:6379\"\n  password: config-test-private-marker\n"))
+	if err == nil || cfg != (Config{}) || strings.Contains(err.Error(), "config-test-private-marker") {
+		t.Fatalf("a YAML Redis password must be rejected without echoing it: %v", err)
+	}
+}
+
 func TestApplyEnvUnsetAndEmpty(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

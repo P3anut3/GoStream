@@ -49,7 +49,7 @@ func TestRouterStaticFilesAndAuthentication(t *testing.T) {
 	}
 	t.Chdir(root)
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	router := newRouter(nil, secret, newTestFeedCursor(t), storage)
+	router := newRouter(nil, secret, newTestFeedCursor(t), storage, nil)
 	for _, tc := range []struct {
 		method, path, rangeHeader string
 		want                      int
@@ -146,7 +146,7 @@ func TestGinGORMHTTPIntegration(t *testing.T) {
 	}
 	t.Chdir(root)
 	storage := newTestStorage(t)
-	server := httptest.NewServer(newRouter(database.WrapSQL(db), []byte(config["JWT_SECRET"]), newTestFeedCursor(t), storage))
+	server := httptest.NewServer(newRouter(database.WrapSQL(db), []byte(config["JWT_SECRET"]), newTestFeedCursor(t), storage, nil))
 	defer server.Close()
 	client := server.Client()
 	request := func(t *testing.T, method, path, token string, payload any) (int, []byte) {

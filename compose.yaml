@@ -68,6 +68,8 @@ services:
       GOSTREAM_DSN: "gostream:${COMPOSE_MYSQL_PASSWORD:?Run scripts/init-compose-env.ps1 first}@tcp(mysql:3306)/gostream?charset=utf8mb4&parseTime=true&loc=Local"
       JWT_SECRET: ${JWT_SECRET:?Run scripts/init-compose-env.ps1 first}
       GOSTREAM_FEED_CURSOR_SECRET: ${GOSTREAM_FEED_CURSOR_SECRET:?Run scripts/init-compose-env.ps1 first}
+      GOSTREAM_REDIS_ADDR: redis:6379
+      GOSTREAM_REDIS_PASSWORD: ${COMPOSE_REDIS_PASSWORD:?Run scripts/init-compose-env.ps1 first}
       GOSTREAM_HTTP_ADDR: 0.0.0.0:8080
       GOSTREAM_VIDEO_DIR: /app/uploads/videos
       GOSTREAM_COVER_DIR: /app/uploads/covers
@@ -77,6 +79,9 @@ services:
       - uploads_data:/app/uploads
     depends_on:
       mysql:
+        condition: service_healthy
+      # Redis is only a cache: it orders startup, but the API keeps serving from MySQL if it fails later.
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--max-time", "2", "http://127.0.0.1:8080/readyz"]

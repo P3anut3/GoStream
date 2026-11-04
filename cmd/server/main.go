@@ -22,6 +22,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -47,7 +48,11 @@ func main() {
 	}
 	pool, _ := db.DB()
 	defer pool.Close()
-	router := newRouter(db, secret, feedCursor, cfg.Storage)
+	redisClient := openRedis(cfg.Redis)
+	if redisClient != nil {
+		defer redisClient.Close()
+	}
+	router := newRouter(db, secret, feedCursor, cfg.Storage, redisClient)
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -69,7 +74,32 @@ func main() {
 	}
 }
 
-func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig) *gin.Engine {
+// openRedis 创建可选的缓存客户端：未配置时返回 nil；连不上只记录日志，请求会直接读 MySQL。
+func openRedis(cfg config.RedisConfig) *redis.Client {
+	if cfg.Addr == "" {
+		log.Printf("未配置 Redis，视频缓存已关闭")
+		return nil
+	}
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.Addr,
+		Password: cfg.Password,
+		// 缓存不能比直接查数据库更慢：超时要短，失败不重试，尽快降级。
+		DialTimeout:  time.Second,
+		ReadTimeout:  300 * time.Millisecond,
+		WriteTimeout: 300 * time.Millisecond,
+		MaxRetries:   -1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		log.Printf("Redis 暂不可用，视频详情将直接查询数据库: %v", err)
+	} else {
+		log.Printf("已连接 Redis 缓存 %s", cfg.Addr)
+	}
+	return client
+}
+
+func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies(nil)
 	router.MaxMultipartMemory = 8 * 1024 * 1024
@@ -81,9 +111,15 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 		JWTSecret: secret,
 		Service:   userService,
 	}
+	// 没有 Redis 时必须传"无类型的 nil"接口；把 nil 指针装进接口会让 cache != nil 成立。
+	var videoCache video.VideoCache
+	if redisClient != nil {
+		videoCache = &video.RedisVideoCache{Client: redisClient, TTL: 10 * time.Minute, Jitter: time.Minute}
+	}
 	videos := &video.Handler{DB: db, UploadDir: storage.VideoDir, CoverDir: storage.CoverDir,
 		CommentService: video.NewCommentService(&video.SQLCommentRepository{DB: db}),
 		LikeService:    video.NewLikeService(&video.SQLLikeRepository{DB: db}),
+		VideoService:   video.NewVideoService(&video.GORMVideoRepository{DB: db}, videoCache),
 	}
 	feedRepository := &feed.GORMRepository{DB: db}
 	feedService := feed.NewService(feedRepository, feedCursor)

@@ -38,6 +38,10 @@ func TestValidateConfig(t *testing.T) {
 		{"空白JWT密钥", func(c *Config) { c.Auth.JWTSecret = strings.Repeat(" ", 32) }, "JWT_SECRET"},
 		{"短游标签名密钥", func(c *Config) { c.Auth.FeedCursorSecret = "private-marker" }, "GOSTREAM_FEED_CURSOR_SECRET"},
 		{"空白游标签名密钥", func(c *Config) { c.Auth.FeedCursorSecret = strings.Repeat(" ", 32) }, "GOSTREAM_FEED_CURSOR_SECRET"},
+		{"未配置Redis表示不启用缓存", func(c *Config) { c.Redis = RedisConfig{} }, ""},
+		{"容器内Redis地址", func(c *Config) { c.Redis = RedisConfig{Addr: "redis:6379", Password: "private-marker"} }, ""},
+		{"Redis缺少端口", func(c *Config) { c.Redis.Addr = "private-marker" }, "Redis 地址"},
+		{"Redis端口超限", func(c *Config) { c.Redis.Addr = "redis:65536" }, "Redis 端口"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validConfigFixture()
@@ -75,6 +79,7 @@ func TestLoadValidatesFinalEnvironmentValues(t *testing.T) {
 		{"缺少DSN", "GOSTREAM_DSN", ""},
 		{"短JWT密钥", "JWT_SECRET", "private-marker"},
 		{"短游标签名密钥", "GOSTREAM_FEED_CURSOR_SECRET", "private-marker"},
+		{"无效Redis地址", "GOSTREAM_REDIS_ADDR", "private-marker"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := validConfigFixture()

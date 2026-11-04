@@ -51,7 +51,7 @@ func TestDeleteIntegration(t *testing.T) {
 	userDB := database.WrapSQL(db)
 	users := &user.UserHandler{JWTSecret: secret, Service: user.NewUserService(&user.GORMRepository{DB: userDB})}
 	uploadDir := t.TempDir()
-	videos := &Handler{DB: database.WrapSQL(db), UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)}), LikeService: NewLikeService(&SQLLikeRepository{DB: database.WrapSQL(db)})}
+	videos := &Handler{DB: database.WrapSQL(db), UploadDir: uploadDir, CoverDir: t.TempDir(), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)}), LikeService: NewLikeService(&SQLLikeRepository{DB: database.WrapSQL(db)}), VideoService: NewVideoService(&GORMVideoRepository{DB: database.WrapSQL(db)}, nil)}
 	h.POST("/users", users.CreateUser)
 	h.POST("/login", users.Login)
 	h.POST("/videos", auth.JWTAuth(secret), videos.Publish)

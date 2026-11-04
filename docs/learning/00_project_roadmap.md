@@ -46,7 +46,8 @@ flowchart LR
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
 | 关注关系 | internal/follow、scripts/migrations/006_follows.sql | 关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成与端到端测试；详情页关注按钮与关注流（GET /feed/following、关注标签页）已通过夹具与真实浏览器验收 | 粉丝列表/计数可后续扩展 |
-| Redis、RabbitMQ、SSE | compose.yaml 提供 Redis/MQ 容器，尚无业务 Client | Redis/MQ 环境已验收；业务及其余能力未实现 | 按后续里程碑推进 |
+| 视频详情缓存 | internal/video/video_{repository,cache,service}.go、cmd/server/main.go | Redis Cache-Aside、删除后失效、Redis 故障降级已完成，miniredis、MySQL 端到端与真实 Redis 验证通过 | singleflight、空值缓存、时间线、限流 |
+| RabbitMQ、SSE | compose.yaml 提供 MQ 容器，尚无业务 Client | MQ 环境已验收；业务未实现 | M4 |
 | 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
 “有源码/有测试”不等于当前浏览器进程正在运行最新版本。实际验收方式及覆盖边界见 [M0 验收记录](07_m0_acceptance.md)；没有进行压测。
@@ -142,6 +143,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 明确 access/refresh 凭证、服务端撤销及过期规则，按需扩展认证状态；当前没有 Refresh Token，不能把页面清 token 当作撤销。
 - 验收：命中减少数据库访问；Redis 不可用时降级符合约定；删除作品不因旧缓存继续泄漏展示。
 - 缓存一致性说明必须包含 TTL 与失效窗口，而不是“设置 Redis 后就强一致”。
+- 进度（2026-11-04）：第一步完成。GET /videos/:id 使用 Redis Cache-Aside（key gostream:video:v1:{id}，TTL 10 分钟加 0～60 秒抖动），删除先删库再删缓存，Redis 故障降级到 MySQL；单元、miniredis、MySQL 端到端、gostream-dev 真实 Redis 与隔离 Compose 浏览器验收通过。下一步：本地缓存与 singleflight、空值缓存。
 
 ### M4：异步事件、Worker 与通知
 
@@ -179,7 +181,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 | YAML / env | API/清理命令已接入加载、覆盖和校验 | M1 | 统一配置与部署覆盖 |
 | Vue 3 / TS / Pinia / Router / Vite | 已迁移并通过真实浏览器验收，Vite 8 原生 Rolldown | M1 | 可维护的展示和验收客户端 |
 | Docker Compose | 四服务编排和持久化重建测试通过 | M1 | 隔离且可复现的环境 |
-| go-redis / Redis | 容器环境已准备，Go 业务未使用 | M3 | 缓存、时间线、限流、后续上传会话 |
+| go-redis / Redis | 视频详情 Cache-Aside 已使用（go-redis v9），测试用 miniredis | M3 | 缓存、时间线、限流、后续上传会话 |
 | go-cache / singleflight | 未使用 | M3 | 短时本地缓存和进程内回源合并 |
 | amqp091-go / RabbitMQ / Worker | RabbitMQ 容器已准备，Go 业务与 Worker 未实现 | M4 | 可靠异步通知与后续事件处理 |
 | SSE | 未实现 | M4 | 通知即时提示与重连补读 |
@@ -223,7 +225,7 @@ M0-1 实施记录：公共页面已使用 /feed，新增加载更多、刷新重
 
 2026-11-01 已补真实浏览器验收：隔离环境 7 条作品验证 6+1 条追加、末尾停止、刷新、我的视频切换；页面上传发布和双账号互动另有独立记录。详见 07_m0_acceptance.md，不把模拟 DOM 测试当作完整浏览器验证。
 
-M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成，下一项为 M3 Redis 缓存。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。Redis 和 MQ 在环境中启动不算业务接入。
+M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成；M3 进行中，视频详情缓存已完成。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。MQ 在环境中启动不算业务接入；Redis 目前只接入了视频详情缓存。
 
 ## 10. 本轮依据与边界
 

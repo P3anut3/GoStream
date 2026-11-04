@@ -19,8 +19,9 @@
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
 - 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流 `GET /feed/following` 与视频库“关注”标签页只展示已关注作者的作品。
+- 视频详情缓存：`GET /videos/:id` 使用 Redis Cache-Aside（可选，未配置 Redis 时直接读 MySQL）；删除作品后让缓存失效，Redis 故障时降级到 MySQL。
 
-当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。Compose 已准备 Redis/RabbitMQ，Go 业务尚未接入；当前仍为单进程模块化应用。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。视频详情已通过 go-redis 接入 Redis 缓存；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
 
 ## Compose 快速启动
 
@@ -106,6 +107,8 @@ GOSTREAM_DSN="root:YOUR_PASSWORD@tcp(127.0.0.1:13306)/gostream?charset=utf8mb4&p
 JWT_SECRET=REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_BYTES
 GOSTREAM_FEED_CURSOR_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_SECRET_AT_LEAST_32_BYTES
 ```
+
+可选：设置 `GOSTREAM_REDIS_ADDR`（例如 `127.0.0.1:16379`）和 `GOSTREAM_REDIS_PASSWORD` 启用视频详情缓存；不设置时直接读写 MySQL。Compose 中的 API 已配置为 `redis:6379`，密码取自 `.env.compose`。
 
 将数据库密码和 JWT 密钥占位符替换成自己的配置。JWT 密钥应使用密码学随机源生成，例如在 PowerShell 中执行以下命令，将输出粘贴到 `JWT_SECRET`：
 
@@ -280,13 +283,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系与关注流的 MySQL 测试不读取 `.env`，只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系、关注流与视频详情缓存的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -314,6 +317,7 @@ try {
 | `internal/video/storage.go`、`storage_test.go` | 文件保存和测试 |
 | `internal/video/upload_test.go` | 上传与公开文件读取测试 |
 | `internal/follow/` | 关注关系的 Handler、Service、Repository 及测试 |
+| `internal/video/video_repository.go`、`video_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存和 Cache-Aside 规则 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
@@ -324,7 +328,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成，下一阶段是 M3 Redis 缓存，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 进行中：视频详情 Cache-Aside 已完成，接下来是本地缓存与 singleflight、时间线缓存、限流和认证增强，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -417,3 +421,9 @@ Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400
 详情页在作者信息下方提供关注按钮。游客点击先打开登录窗口，不发送请求；登录后用 GET 读取状态，点击发送 PUT 或 DELETE，成功后重新 GET，以后端结果更新按钮；作者本人看不到按钮；读取失败时禁用按钮并提供“重新读取关注状态”。切换视频或账号后忽略旧响应。Chromium 夹具测试覆盖这些交互和请求顺序；隔离 Compose 的真实浏览器测试验证双账号关注、返回页面后状态保持、取消关注和作者本人不显示按钮。
 
 `GET /feed/following` 要求 Bearer token，只返回当前用户关注的作者的作品；排序、limit+1 和批量作者/点赞补全与最新流相同。游标在签名内记录流类型，最新流游标不能续读关注流，反之亦然，误用返回 400 `INVALID_CURSOR`；游标不含身份，关注者始终来自 JWT。续读按 (created_at, id) 位置进行，没有快照：翻页期间新关注的作者的旧作品可能出现在后续页，已取关作者的剩余作品不再出现。视频库的“关注”标签页需要登录，使用独立的游标，切换标签或账号时重新加载。Go 单元测试覆盖游标类型绑定、分页与错误映射；设置 `GOSTREAM_TEST_MYSQL_DSN` 后，集成和端到端测试验证筛选、同一时间边界不越界、有向关系、取关后不可见和游标不能混用；隔离 Compose 真实浏览器测试验证关注页分页、自己的作品不进入关注流以及取关后关注页为空。
+
+### 视频详情缓存
+
+`GET /videos/:id` 由 `VideoService` 按 Cache-Aside 读取：先查 Redis 键 `gostream:video:v1:{id}`，命中直接返回；未命中再查 MySQL，并把公开字段（id、作者、标题、播放和封面地址、发布时间）写回 Redis，过期时间为 10 分钟加 0～60 秒随机值，避免大量键同时过期。点赞数和“我是否点赞”等个人或易变数据不进入缓存。`DELETE /videos/:id` 先删数据库记录，成功后再删除缓存；删除缓存失败时只记日志，旧数据最多保留到过期（不超过 11 分钟），这是明确的失效窗口，不是强一致。Redis 读写失败一律记日志并降级到 MySQL，详情页不因缓存故障不可用；Redis 客户端使用短超时、不重试，就绪检查不包含 Redis。暂不缓存“不存在”的 ID，空值缓存与 singleflight 在 M3 后续步骤加入。
+
+响应字段和状态码与接入缓存前一致。默认测试覆盖 Cache-Aside 命中与未命中、缓存读写失败降级、先删库后删缓存、Repository 的 SQL 与错误翻译（数据库故障不会被说成“不存在”）以及基于 miniredis 的键、过期时间与抖动；`TestVideoDetailCacheHTTPIntegration` 通过真实路由和 MySQL 验证命中不查库、Redis 停机降级、恢复后重新命中和删除后失效。没有进行压测，不给出命中率或性能提升数值。

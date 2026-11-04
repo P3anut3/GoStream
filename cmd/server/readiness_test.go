@@ -94,7 +94,7 @@ func TestReadinessFailureAndRecovery(t *testing.T) {
 		}
 		return nil
 	})
-	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t))
+	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
 	if calls.Load() != 0 {
 		t.Fatal("route registration must not ping the database")
 	}
@@ -130,7 +130,7 @@ func TestReadinessUnavailablePool(t *testing.T) {
 		{"closed_sql_pool", database.WrapSQL(closed)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			router := newRouter(tc.db, []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t))
+			router := newRouter(tc.db, []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
 			requestProbe(t, router, "/readyz", 503, "not_ready")
 			requestProbe(t, router, "/healthz", 200, "ok")
 		})
@@ -155,7 +155,7 @@ func TestReadinessTimeout(t *testing.T) {
 		}
 		return cause
 	})
-	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t))
+	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	request = request.WithContext(context.WithValue(request.Context(), probeContextKey{}, "request-marker"))
 	response := httptest.NewRecorder()
@@ -181,7 +181,7 @@ func TestReadinessRequestCancellation(t *testing.T) {
 		causes <- err
 		return err
 	})
-	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t))
+	router := newRouter(database.WrapSQL(pool), []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	request := httptest.NewRequest(http.MethodGet, "/readyz", nil).WithContext(ctx)

@@ -1,6 +1,6 @@
 # M1：Compose 开发环境
 
-状态（2026-11-02）：四服务、SIGTERM、隔离重建及持久化测试已通过；后续 Vue 迁移与真实浏览器验收也已完成，见 [迁移记录](13_vue_migration.md)。Redis/RabbitMQ 仅完成环境准备。阶段提交已推送到 GitHub，基础 CI 首次运行通过。
+状态（2026-11-02）：四服务、SIGTERM、隔离重建及持久化测试已通过；后续 Vue 迁移与真实浏览器验收也已完成，见 [迁移记录](13_vue_migration.md)。Redis 自 M3 起用于视频详情缓存，RabbitMQ 仅完成环境准备。阶段提交已推送到 GitHub，基础 CI 首次运行通过。
 
 本机 `gostream-dev` 开发栈已启动，四服务均 healthy；首页返回 200，`/healthz` 和 `/readyz` 均返回 ok。使用全新的开发卷，没有导入原 Windows MySQL 数据。原停止状态的 redis 容器和原本机配置保留。
 
@@ -16,11 +16,11 @@ flowchart LR
     API -->|mysql:3306| DB[(MySQL)]
     API --> FILES[(uploads_data)]
     DB --> DATA[(mysql_data)]
-    R[Redis：预备组件] --> RD[(redis_data)]
+    API -.->|redis:6379 视频详情缓存| R[Redis] --> RD[(redis_data)]
     MQ[RabbitMQ：预备组件] --> MD[(rabbitmq_data)]
 ```
 
-图中没有 API 到 Redis/MQ 的业务箭头，因为当前源码还没有相应 Client 和读写调用。之后在 M3/M4 接入。
+M3 起 API 通过 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 连接 Redis，用于视频详情缓存（虚线表示可选依赖：Redis 故障时降级到 MySQL）。图中没有 API 到 MQ 的箭头，RabbitMQ 在 M4 接入。
 
 ## 2. 首次启动与日常使用
 
@@ -73,7 +73,7 @@ API 容器里的 `127.0.0.1` 是 API 容器自己，并不是 Windows，也不�
 
 MySQL 健康检查使用应用账号连接数据库，并确认 users 表可查询。API 的 `depends_on: mysql: condition: service_healthy` 等待这个条件满足后启动；API 自身使用 `/readyz` 做健康检查。Redis 通过带密码的 PING 检查，RabbitMQ 检查节点运行状态。
 
-API 当前只依赖 MySQL 的启动健康状态。Redis/MQ 还不是业务依赖，不应阻止 API 启动。`depends_on` 处理启动顺序；它不等于运行时自动修复，也不会因为容器变为 unhealthy 就自动重启它。`restart: unless-stopped` 处理进程退出后的重启。依据：[Compose 启动顺序](https://docs.docker.com/compose/how-tos/startup-order/)。
+API 启动前等待 MySQL 和 Redis 健康。Redis 只是缓存：运行中故障时 API 降级到 MySQL，`/readyz` 也不检查 Redis；MQ 还不是业务依赖，不应阻止 API 启动。`depends_on` 处理启动顺序；它不等于运行时自动修复，也不会因为容器变为 unhealthy 就自动重启它。`restart: unless-stopped` 处理进程退出后的重启。依据：[Compose 启动顺序](https://docs.docker.com/compose/how-tos/startup-order/)。
 
 ## 5. 数据为什么能保留
 
@@ -120,6 +120,6 @@ try {
 
 ## 7. 下一步与阅读检查
 
-Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成，下一步在 M3/M4 加 Redis 和 MQ 的业务读写。
+Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成；M3 已在视频详情使用 Redis，MQ 的业务读写在 M4。
 
 先尝试回答：API 为什么访问 mysql:3306，而你在 Windows 连接数据库却使用 127.0.0.1:13307？如果只删 API 容器，作品记录和视频文件分别靠什么保留？

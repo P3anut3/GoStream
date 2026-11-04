@@ -16,7 +16,7 @@
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
-| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis/MQ 尚无业务调用；没有吞吐量结论 |
+| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis 已用于视频详情缓存，MQ 尚无业务调用；没有吞吐量结论 |
 
 现有数据库有 users、videos、uploads、video_likes、video_comments、follows 六张业务表（follows 由 006 迁移加入）。没有 notifications、outbox_events 等表。
 
@@ -28,7 +28,7 @@
 | --- | --- | --- | --- |
 | Gin / GORM / MySQL / JWT / bcrypt | HTTP、ORM、业务持久化、认证 | 已使用；Gin/GORM 等核心组件已对齐 | 持续使用，不为匹配旧补丁版本降级 |
 | YAML / dotenv | 配置及环境覆盖 | 已有同类能力；当前 goccy/go-yaml，参考直接使用 gopkg.in/yaml.v3 | 若要求具体解析库也一致，M1 收尾时小范围迁移并保留严格解析测试 |
-| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | Compose 认证、读写及持久化已验收；Go 业务未接入 | M3，分片会话在 M5 |
+| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside 已接入（go-redis v9）；时间线、热榜、限流、Token 状态未做 | M3 继续，分片会话在 M5 |
 | go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 未使用；间接依赖中出现 x/sync 不代表实现了合并 | M3，在基础 Cache-Aside 之后 |
 | amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | Compose 环境和持久消息测试通过；Go AMQP Client 未接入 | M4 |
 | Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 没有消息 Worker 或 Outbox；清理命令不是消息消费者 | M4 |
@@ -36,7 +36,7 @@
 | Vue 3 / TS / Pinia / Router / Vite | 页面组件、类型约束、状态与路由、前端构建；参考 vite 指向 rolldown-vite 别名 | 已迁移，采用原生 Rolldown 的 Vite 8；构建及浏览器验收通过 | M1 已完成此项；不为复制旧别名降级 |
 | spark-md5 / 分片上传 | 浏览器文件摘要、Redis 会话、上传进度与分片合并 | 未实现 | M5 |
 | Docker Compose | MySQL/Redis/RabbitMQ/API/Worker/前端、网络、卷和健康依赖 | 四服务已验收；Vue 构建产物由 API 镜像提供；Worker 待实现 | M1 环境就绪，独立 Worker 在 M4 |
-| CI / miniredis / pprof | 自动 Go 检查与前端构建、Redis 测试替身、性能诊断 | 基础 CI 已在 GitHub Actions 运行通过；无 miniredis/pprof | Redis 测试在 M3，诊断与性能在 M6 |
+| CI / miniredis / pprof | 自动 Go 检查与前端构建、Redis 测试替身、性能诊断 | 基础 CI 已在 GitHub Actions 运行通过；miniredis 已用于缓存测试；无 pprof | 诊断与性能在 M6 |
 
 核对来源：[后端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/go.mod)、[前端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/frontend/package.json)、[Feed 实现](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/feed/service.go)、[路由和装配](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/http/router.go)、[Compose](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/docker-compose.yml)、[CI](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/.github/workflows/ci.yml)。
 

@@ -59,6 +59,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
 | 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；关注按钮与关注流（GET /feed/following、关注标签页）已完成 |
+| 视频详情缓存 | GET /videos/:id 的 Redis Cache-Aside；删除后失效；Redis 故障降级 MySQL | `internal/video/video_{repository,cache,service}.go`；TTL 10 分钟加抖动；未做空值缓存和 singleflight |
 | 上传清理 | pending/published/deleting 生命周期；24 小时未发布上传的手工预览/执行清理 | `cmd/cleanup-uploads`、`upload_cleanup*`；行锁协调发布与清理、失败重试，无自动定时调度 |
 | 配置与健康 | YAML+env 覆盖与校验；healthz/readyz；SIGINT/SIGTERM 退出 | `internal/config`、`internal/health`；readyz 对 DB Ping 最长 1 秒 |
 | 前端 | Vue/TS/Pinia/Router/Vite；注册登录、发布播放、Feed、我的作品、点赞评论、作者删除 | `frontend/src`；迁移及真实浏览器验收已完成 |
@@ -69,7 +70,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 
 重要边界：
 
-- Redis/RabbitMQ 容器可用、环境读写/持久化测试通过，但 Go 业务没有相应 Client 或调用。不能说缓存、异步业务已接入。
+- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级）；Feed、时间线、限流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
 - 没有 notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
@@ -189,7 +190,7 @@ go run ./cmd/server
 
 默认本机页面/API 为 http://127.0.0.1:8080/，实际取决于本机配置。开发热更新在 frontend 执行 npm run dev，访问 5173；默认代理 API 到 19080。本机 API 为 8080 时，执行 dev 前设置 `GOSTREAM_DEV_PROXY=http://127.0.0.1:8080`。
 
-配置非敏感默认项在 internal/config/config.yaml；GOSTREAM_DSN、JWT_SECRET、GOSTREAM_FEED_CURSOR_SECRET 来自环境；HTTP/媒体目录也可由环境覆盖。JWT 与游标签名使用不同密钥。清理命令目前共用完整配置校验，也要求这两项密钥，虽清理本身不用 JWT。
+配置非敏感默认项在 internal/config/config.yaml；GOSTREAM_DSN、JWT_SECRET、GOSTREAM_FEED_CURSOR_SECRET 来自环境；HTTP/媒体目录也可由环境覆盖。Redis 可选：YAML `redis.addr` 默认为空，`GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 来自环境，Compose 中 API 使用 `redis:6379`。JWT 与游标签名使用不同密钥。清理命令目前共用完整配置校验，也要求这两项密钥，虽清理本身不用 JWT。
 
 ## 9. 已验证结果及复现
 
@@ -258,6 +259,8 @@ try {
 
 进度（2026-11-03）：M2 已完成并提交。follows 表（006 迁移）、关注/取消/状态 API（PUT 204/400/404，DELETE 一律 204，GET 200/404）、详情页关注按钮、关注流 GET /feed/following（游标在签名内绑定流类型）和视频库关注标签页均已实现；单元、HTTP、真实 MySQL 集成、端到端、Vitest 14 项、Chromium 夹具 9 项和隔离 Compose 真实浏览器验收通过。用户的 Windows 库和 gostream-dev 数据卷还没有执行 006，须用户确认后再执行；gostream-api:dev 已按新代码重建，dev 栈下次重建 API 容器时会用到它。下一项是 M3。
 
+M3 进度（2026-11-04）：第一步视频详情 Cache-Aside 已完成并提交（go-redis v9.23.0、miniredis v2.40.0）；gostream-dev 已执行 006，API 容器已换新镜像并连上 Redis。用户决定以后只用 Compose 开发环境，不再使用 Windows 本机 MySQL。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -293,7 +296,7 @@ try {
 | --- | --- |
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
-| M3 | Redis Cache-Aside、时间线、本地缓存/singleflight、限流、认证刷新/撤销策略 |
+| M3 | 进行中：视频详情 Cache-Aside 已完成；余下时间线、本地缓存/singleflight、空值缓存、限流、认证刷新/撤销策略 |
 | M4 | 同步业务事实 + 同事务 Outbox、RabbitMQ、独立 Worker、幂等/ACK/重试、通知与鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |

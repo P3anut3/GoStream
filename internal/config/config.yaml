@@ -4,3 +4,7 @@ http:
 storage:
   video_dir: "uploads/videos"
   cover_dir: "uploads/covers"
+
+# 为空表示不启用 Redis 缓存；Compose 中由 GOSTREAM_REDIS_ADDR 覆盖，密码只走 GOSTREAM_REDIS_PASSWORD。
+redis:
+  addr: ""

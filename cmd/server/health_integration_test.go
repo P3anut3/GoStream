@@ -28,7 +28,7 @@ func TestHealthRoutesMySQLIntegration(t *testing.T) {
 		t.Fatal("cannot obtain test connection pool")
 	}
 	t.Cleanup(func() { pool.Close() })
-	router := newRouter(db, []byte("health-integration-test-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t))
+	router := newRouter(db, []byte("health-integration-test-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
 	server := httptest.NewServer(router)
 	t.Cleanup(server.Close)
 	client := &http.Client{Timeout: 3 * time.Second}

@@ -21,6 +21,11 @@ func applyEnv(cfg *Config) {
 		cfg.Storage.CoverDir = value
 	}
 
+	if value, exists := os.LookupEnv("GOSTREAM_REDIS_ADDR"); exists {
+		cfg.Redis.Addr = value
+	}
+
+	cfg.Redis.Password = os.Getenv("GOSTREAM_REDIS_PASSWORD")
 	cfg.Database.DSN = os.Getenv("GOSTREAM_DSN")
 	cfg.Auth.JWTSecret = os.Getenv("JWT_SECRET")
 	cfg.Auth.FeedCursorSecret = os.Getenv("GOSTREAM_FEED_CURSOR_SECRET")

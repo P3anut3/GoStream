@@ -22,6 +22,7 @@ type Handler struct { // 持有数据库连接池，后续提供处理方法
 	CoverDir       string
 	CommentService *CommentService
 	LikeService    *LikeService
+	VideoService   *VideoService
 }
 
 type PublishRequest struct { // 接收客户端提交的发布信息
@@ -41,11 +42,16 @@ func (h *Handler) GetByID(c *gin.Context) {
 		})
 		return
 	}
-	// 2、查询视频
-	var video Video
-	err = h.DB.WithContext(ctx).Where("id = ?", id).Take(&video).Error
+	// 2、查询视频：VideoService 先查缓存，未命中再查数据库
+	if h.VideoService == nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{
+			"error": "视频服务未初始化",
+		})
+		return
+	}
+	video, err := h.VideoService.GetVideo(ctx, id)
 	// 3、区分 “不存在”和“查询失败”
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(err, ErrVideoNotFound) {
 		c.JSON(http.StatusNotFound, map[string]string{
 			"error": "视频不存在",
 		})
@@ -168,15 +174,19 @@ func (h *Handler) Delete(c *gin.Context) {
 		})
 		return
 	}
-	// 3、只删除当前用户拥有的视频
-	result := h.DB.WithContext(ctx).Where("id = ? AND author_id = ?", vidoID, userID).Delete(&Video{})
-	if result.Error != nil {
-		log.Printf("删除视频失败: %v", result.Error)
-		c.JSON(http.StatusInternalServerError, map[string]string{"error": "删除视频失败"})
+	// 3、只删除当前用户拥有的视频；删除成功后 VideoService 会让缓存失效
+	if h.VideoService == nil {
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "视频服务未初始化"})
 		return
 	}
-	if result.RowsAffected == 0 {
+	err = h.VideoService.DeleteVideo(ctx, vidoID, userID)
+	if errors.Is(err, ErrVideoNotFound) {
 		c.JSON(http.StatusNotFound, map[string]string{"error": "视频不存在或不属于当前用户"})
+		return
+	}
+	if err != nil {
+		log.Printf("删除视频失败: %v", err)
+		c.JSON(http.StatusInternalServerError, map[string]string{"error": "删除视频失败"})
 		return
 	}
 	c.Status(http.StatusNoContent)

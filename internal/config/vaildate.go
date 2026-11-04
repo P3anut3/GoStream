@@ -30,6 +30,18 @@ func (cfg Config) Validate() error {
 		return errors.New("封面保存目录不能为空")
 	}
 
+	// Redis 可以不配置；一旦配置了地址，就必须是可连接的 host:port。
+	if strings.TrimSpace(cfg.Redis.Addr) != "" {
+		_, redisPort, err := net.SplitHostPort(cfg.Redis.Addr)
+		if err != nil {
+			return errors.New("Redis 地址必须使用 host:port 格式")
+		}
+		redisPortNumber, err := strconv.Atoi(redisPort)
+		if err != nil || redisPortNumber < 1 || redisPortNumber > 65535 {
+			return errors.New("Redis 端口必须为 1～65535")
+		}
+	}
+
 	if strings.TrimSpace(cfg.Database.DSN) == "" {
 		return errors.New("请配置 GOSTREAM_DSN")
 	}

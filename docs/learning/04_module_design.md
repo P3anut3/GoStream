@@ -59,6 +59,7 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 清理与发布通过相同上传记录的行锁协调；不能在锁释放后凭之前读到的 pending 状态直接删除文件。
 - 当前作品写入 videos 就表示发布，没有独立审核队列；uploads.status 不作为作品可见性字段。
 - 删除作品按 id + author_id 条件执行；点赞、评论依赖外键级联删除，物理媒体仍保留。
+- 详情缓存（M3 已实现）：GET /videos/:id 经 VideoService 走 Cache-Aside，key gostream:video:v1:{id}，只缓存公开字段，TTL 10 分钟加 0～60 秒随机值；删除先删库再删缓存，删缓存失败时旧数据最多保留到过期（≤11 分钟）；Redis 读写失败只记日志并降级到 MySQL；暂不缓存“不存在”，空值缓存与 singleflight 在 M3 第二步。
 - 后续发布事务扩展：同一事务写出 video.published 事件的 outbox 行，提交后由 Worker 转发。
 - 验收：A 不能发布 B 的资源，不能删 B 的作品；事务失败无半条作品；清理竞争不破坏已发布作品。
 
