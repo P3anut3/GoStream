@@ -11,7 +11,7 @@
 | 用户与认证 | 注册、登录、当前用户、bcrypt、JWT 签名/校验、写接口身份来源 | internal/user、internal/auth | 没有 Refresh Token、服务端撤销、资料编辑；页面退出只清除内存 token |
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
-| 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；没有 Redis 时间线、热榜或推荐模型 |
+| 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；最新流已有 Redis 时间线（最新 500 条，发布/删除后整条重建）；没有热榜或推荐模型 |
 | 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入；没有通知、已赞列表或 @ 提及 |
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
@@ -28,8 +28,8 @@
 | --- | --- | --- | --- |
 | Gin / GORM / MySQL / JWT / bcrypt | HTTP、ORM、业务持久化、认证 | 已使用；Gin/GORM 等核心组件已对齐 | 持续使用，不为匹配旧补丁版本降级 |
 | YAML / dotenv | 配置及环境覆盖 | 已有同类能力；当前 goccy/go-yaml，参考直接使用 gopkg.in/yaml.v3 | 若要求具体解析库也一致，M1 收尾时小范围迁移并保留严格解析测试 |
-| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside 已接入（go-redis v9）；时间线、热榜、限流、Token 状态未做 | M3 继续，分片会话在 M5 |
-| go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；没有跨实例合并 | 时间线等后续缓存按需复用 |
+| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside 与最新流时间线已接入（go-redis v9）；热榜、限流、Token 状态未做 | M3 继续，分片会话在 M5 |
+| go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；最新流时间线的重建也用 singleflight 合并；没有跨实例合并 | 后续缓存按需复用 |
 | amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | Compose 环境和持久消息测试通过；Go AMQP Client 未接入 | M4 |
 | Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 没有消息 Worker 或 Outbox；清理命令不是消息消费者 | M4 |
 | SSE / 通知 | 通知持久化、列表/未读/已读与实时流 | 未实现 | M4，先有通知数据与鉴权再推送 |

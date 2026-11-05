@@ -55,7 +55,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 上传 | MP4 最大 100 MiB；JPEG/PNG 封面最大 5 MiB；校验、随机名、本地保存与上传记录 | `internal/video/handler.go`、`cover.go`、`storage.go`；普通上传，不是分片或对象存储 |
 | 发布 | 校验视频/封面归属，事务与行锁，创建作品并更新上传状态 | `internal/video/handler.go`、`upload_repository.go`；当前没有管理员审核 |
 | 作品管理 | 公共列表、详情、我的视频、仅作者删除 | 部分仍直接在 Handler 使用 GORM，不宣称全项目已统一分层 |
-| 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息 | `internal/feed`；MySQL 最新流与关注流，无缓存或推荐模型 |
+| 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息；最新流先读 Redis 时间线 | `internal/feed`；时间线缓存最新 500 条（ZSET 存顺序、HASH 存公开字段），发布/删除后整条失效、读时重建，超出窗口或故障回源 MySQL；关注流直接查 MySQL；无推荐模型 |
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
 | 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；关注按钮与关注流（GET /feed/following、关注标签页）已完成 |
@@ -70,7 +70,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 
 重要边界：
 
-- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；Feed、时间线、限流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
+- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；关注流、限流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
 - 没有 notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
@@ -263,6 +263,8 @@ M3 进度（2026-11-04）：第一步视频详情 Cache-Aside 已完成并提交
 
 M3 第二步（2026-11-05）：视频详情两级缓存已完成。go-cache v2.1.0 进程内缓存 5 秒挡在 Redis 前面；singleflight（x/sync v0.24.0）用 DoChan 合并同一 ID 的并发回源，共享查询不随第一个调用方取消，另有 3 秒超时；MySQL 确认不存在时写 30 秒 `missing` 标记，发布事务提交后清除；Redis 客户端设 `DialerRetries: 1`（go-redis 默认建连重试 5 次）。三个业务文件由用户按参考实现编写。Windows 单元与一次性 MySQL 集成测试、Linux vet/race、gostream-dev 真实 Redis（本地命中不发 Redis GET，标记 TTL 29 秒）和隔离 Compose 真实浏览器验收通过。下一步：时间线缓存。
 
+M3 第三步（2026-11-06）：最新流时间线已完成。`internal/feed/timeline.go` 的 RedisTimeline 用有序集合 `gostream:feed:latest:v1:ids`（成员补零到 20 位，分数为毫秒发布时间，底部哨兵 `end`/`more`）加哈希 `gostream:feed:latest:v1:videos`（公开字段 JSON）缓存最新 500 条，1 分钟过期；`feed.Service` 先问时间线，缺失时 singleflight 重建（读 MySQL 501 行），超出窗口或 Redis 故障回源 MySQL，作者名与点赞信息仍每次查 MySQL。`video` 包定义 `LatestFeed` 接口，在发布提交后、删除成功后调用 `InvalidateLatest` 让时间线整条失效，由 `main.go` 装配。没有做发布时增量 ZADD（`Video.CreatedAt` 由 MySQL 默认值填写），留作优化。`timeline.go`、`service.go` 由用户按参考实现编写。Windows 单元与一次性 MySQL 集成测试（带/不带 Redis 两个路由逐页 JSON 一致）、Linux vet/race、gostream-dev 真实 Redis（换镜像前后首页逐字节一致，游标页走 Redis 且日志无降级）和隔离 Compose 真实浏览器验收通过。下一步：限流。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -298,7 +300,7 @@ M3 第二步（2026-11-05）：视频详情两级缓存已完成。go-cache v2.1
 | --- | --- |
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
-| M3 | 进行中：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存已完成；余下时间线、限流、认证刷新/撤销策略 |
+| M3 | 进行中：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线已完成；余下限流、认证刷新/撤销策略 |
 | M4 | 同步业务事实 + 同事务 Outbox、RabbitMQ、独立 Worker、幂等/ACK/重试、通知与鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |

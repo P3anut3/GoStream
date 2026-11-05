@@ -47,7 +47,8 @@ func TestPublishTransaction(t *testing.T) {
 			// Someone probed the next ID (99) before it was published, leaving a "missing" marker.
 			cache := &commitCheckingCache{fakeVideoCache: newFakeVideoCache(), store: store}
 			cache.items[99] = nil
-			handler := &Handler{DB: database.WrapSQL(db), VideoService: NewVideoService(&fakeVideoRepository{}, cache)}
+			latest := &fakeLatestFeed{committed: func() bool { return store.committed }}
+			handler := &Handler{DB: database.WrapSQL(db), VideoService: NewVideoService(&fakeVideoRepository{}, cache), LatestFeed: latest}
 			h := gin.New()
 			h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
 			coverURL := "/cover.svg"
@@ -70,12 +71,15 @@ func TestPublishTransaction(t *testing.T) {
 				if _, marked := cache.items[99]; marked || !cache.clearedAfterCommit {
 					t.Error("publishing must clear the new video's missing marker after the commit")
 				}
+				if latest.calls != 1 || !latest.afterCommit {
+					t.Errorf("publishing must invalidate the latest feed once after the commit (calls %d)", latest.calls)
+				}
 			} else {
 				if store.committed || !store.rolledBack {
 					t.Error("failure must rollback without committing partial changes")
 				}
-				if _, _, _, deletes := cache.counts(); deletes != 0 {
-					t.Error("a failed publish must not touch the cache")
+				if _, _, _, deletes := cache.counts(); deletes != 0 || latest.calls != 0 {
+					t.Error("a failed publish must not touch the caches")
 				}
 			}
 			if strings.Contains(string(resp.Body()), "private storage failure") {
@@ -96,6 +100,21 @@ type commitCheckingCache struct {
 func (c *commitCheckingCache) Delete(ctx context.Context, id uint64) error {
 	c.clearedAfterCommit = c.store.committed
 	return c.fakeVideoCache.Delete(ctx, id)
+}
+
+// fakeLatestFeed records latest-feed invalidations and, for publishing, whether the
+// transaction had committed by then.
+type fakeLatestFeed struct {
+	calls       int
+	committed   func() bool
+	afterCommit bool
+}
+
+func (f *fakeLatestFeed) InvalidateLatest(context.Context) {
+	f.calls++
+	if f.committed != nil {
+		f.afterCommit = f.committed()
+	}
 }
 
 // A transactional driver injects failures at each stage and observes Commit/Rollback.

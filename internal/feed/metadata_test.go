@@ -38,7 +38,7 @@ func TestServiceBatchMetadata(t *testing.T) {
 				return Metadata{Authors: map[uint64]string{2: "作者"}, Likes: map[uint64]LikeSummary{30: {LikeCount: 2, Liked: viewer == 7 || viewer == 0}}}, nil
 			},
 		}
-		result, err := NewService(repo, testCursorCodec(t)).ListLatestForViewer(ctx, 2, "", viewer)
+		result, err := NewService(repo, testCursorCodec(t), nil).ListLatestForViewer(ctx, 2, "", viewer)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -50,7 +50,7 @@ func TestServiceBatchMetadata(t *testing.T) {
 func TestServiceMetadataErrors(t *testing.T) {
 	failure := errors.New("metadata unavailable")
 	r := metadataRepository{feedRepositoryFunc: func(context.Context, *Position, int) ([]FeedItem, error) { return []FeedItem{{ID: 1}}, nil }, load: func(context.Context, []uint64, []uint64, uint64) (Metadata, error) { return Metadata{}, failure }}
-	result, err := NewService(r, testCursorCodec(t)).ListLatest(context.Background(), 10, "")
+	result, err := NewService(r, testCursorCodec(t), nil).ListLatest(context.Background(), 10, "")
 	if !errors.Is(err, failure) || len(result.Videos) != 0 {
 		t.Fatal("metadata failure must propagate")
 	}
@@ -59,7 +59,7 @@ func TestServiceMetadataErrors(t *testing.T) {
 		t.Fatal("empty page must not enrich")
 		return Metadata{}, nil
 	}
-	if _, err := NewService(r, testCursorCodec(t)).ListLatest(context.Background(), 10, ""); err != nil {
+	if _, err := NewService(r, testCursorCodec(t), nil).ListLatest(context.Background(), 10, ""); err != nil {
 		t.Fatal(err)
 	}
 }

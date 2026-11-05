@@ -120,19 +120,23 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	}
 	// 没有 Redis 时必须传"无类型的 nil"接口；把 nil 指针装进接口会让 cache != nil 成立。
 	var videoCache video.VideoCache
+	var latestTimeline feed.LatestTimeline
 	if redisClient != nil {
 		// 两层缓存：进程内 5 秒挡住热点，Redis 10 分钟；"不存在"标记只保留 30 秒。
 		redisCache := &video.RedisVideoCache{Client: redisClient, TTL: 10 * time.Minute, Jitter: time.Minute, MissingTTL: 30 * time.Second}
 		videoCache = video.NewLocalVideoCache(redisCache, 5*time.Second)
+		// 首页时间线：缓存最新 500 条，1 分钟过期；作品发布、删除后整条失效。
+		latestTimeline = &feed.RedisTimeline{Client: redisClient, Size: 500, TTL: time.Minute}
 	}
+	feedRepository := &feed.GORMRepository{DB: db}
+	feedService := feed.NewService(feedRepository, feedCursor, latestTimeline)
+	feedHandler := feed.NewHandler(feedService)
 	videos := &video.Handler{DB: db, UploadDir: storage.VideoDir, CoverDir: storage.CoverDir,
 		CommentService: video.NewCommentService(&video.SQLCommentRepository{DB: db}),
 		LikeService:    video.NewLikeService(&video.SQLLikeRepository{DB: db}),
 		VideoService:   video.NewVideoService(&video.GORMVideoRepository{DB: db}, videoCache),
+		LatestFeed:     feedService, // 发布、删除作品后让首页时间线失效
 	}
-	feedRepository := &feed.GORMRepository{DB: db}
-	feedService := feed.NewService(feedRepository, feedCursor)
-	feedHandler := feed.NewHandler(feedService)
 	followRepository := &follow.GORMRepository{DB: db}
 	followService := follow.NewService(followRepository)
 	followHandler := follow.NewHandler(followService)

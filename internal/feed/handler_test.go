@@ -29,7 +29,7 @@ func TestHandlerInvalidQuery(t *testing.T) {
 				return nil, nil
 			})
 			router := gin.New()
-			router.GET("/feed", NewHandler(NewService(repo, testCursorCodec(t))).ListLatest)
+			router.GET("/feed", NewHandler(NewService(repo, testCursorCodec(t), nil)).ListLatest)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/feed?"+tc.query, nil))
 			if response.Code != http.StatusBadRequest {
@@ -68,7 +68,7 @@ func TestHandlerFeedPagination(t *testing.T) {
 		return []FeedItem{{ID: 28, CreatedAt: stamp}}, nil
 	})
 	router := gin.New()
-	router.GET("/feed", NewHandler(NewService(repo, codec)).ListLatest)
+	router.GET("/feed", NewHandler(NewService(repo, codec, nil)).ListLatest)
 	get := func(path string) ListResponse {
 		t.Helper()
 		response := httptest.NewRecorder()
@@ -111,7 +111,7 @@ func TestHandlerEmptyFeedAndInternalFailure(t *testing.T) {
 			return nil, nil
 		})
 		router := gin.New()
-		router.GET("/feed", NewHandler(NewService(repo, testCursorCodec(t))).ListLatest)
+		router.GET("/feed", NewHandler(NewService(repo, testCursorCodec(t), nil)).ListLatest)
 		response := httptest.NewRecorder()
 		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/feed", nil))
 		if !fail {
@@ -173,7 +173,7 @@ func TestHandlerFollowing(t *testing.T) {
 				}
 				return []FeedItem{{ID: 30, AuthorID: 2, CreatedAt: stamp}}, nil
 			}}
-			handler := NewHandler(NewService(repo, codec))
+			handler := NewHandler(NewService(repo, codec, nil))
 			router := gin.New()
 			if tc.withJWT {
 				router.GET("/feed/following", auth.JWTAuth(secret), handler.ListFollowing)

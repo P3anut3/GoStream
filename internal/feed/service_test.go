@@ -70,7 +70,7 @@ func TestServicePagination(t *testing.T) {
 				}
 				return items, nil
 			})
-			response, err := NewService(repo, codec).ListLatest(ctx, 2, "")
+			response, err := NewService(repo, codec, nil).ListLatest(ctx, 2, "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -114,7 +114,7 @@ func TestServiceLimitRules(t *testing.T) {
 			}
 			return nil, nil
 		})
-		_, err := NewService(repo, testCursorCodec(t)).ListLatest(context.Background(), tc.limit, "")
+		_, err := NewService(repo, testCursorCodec(t), nil).ListLatest(context.Background(), tc.limit, "")
 		if err != nil || calls != 1 {
 			t.Fatalf("valid limit rejected: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestServiceRejectsInvalidInputBeforeQuery(t *testing.T) {
 				t.Fatal("invalid input must not query database")
 				return nil, nil
 			})
-			_, err := NewService(repo, testCursorCodec(t)).ListLatest(context.Background(), tc.limit, tc.token)
+			_, err := NewService(repo, testCursorCodec(t), nil).ListLatest(context.Background(), tc.limit, tc.token)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
@@ -164,7 +164,7 @@ func TestServiceContinuesFromReturnedCursor(t *testing.T) {
 		}
 		return []FeedItem{{ID: 28, CreatedAt: stamp}}, nil
 	})
-	service := NewService(repo, codec)
+	service := NewService(repo, codec, nil)
 	first, err := service.ListLatest(context.Background(), 2, "")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +181,7 @@ func TestServiceContinuesFromReturnedCursor(t *testing.T) {
 func TestServicePreservesRepositoryErrors(t *testing.T) {
 	for _, failure := range []error{errors.New("database unavailable"), context.Canceled} {
 		repo := feedRepositoryFunc(func(context.Context, *Position, int) ([]FeedItem, error) { return nil, failure })
-		response, err := NewService(repo, testCursorCodec(t)).ListLatest(context.Background(), 10, "")
+		response, err := NewService(repo, testCursorCodec(t), nil).ListLatest(context.Background(), 10, "")
 		if !errors.Is(err, failure) || response.HasMore || response.NextCursor != "" || len(response.Videos) != 0 {
 			t.Fatalf("failed query returned success data: %+v, %v", response, err)
 		}
@@ -218,7 +218,7 @@ func TestServiceFollowingUsesViewerAndItsOwnCursor(t *testing.T) {
 			return Metadata{Authors: map[uint64]string{2: "作者乙", 3: "作者丙"}, Likes: map[uint64]LikeSummary{30: {LikeCount: 1, Liked: true}}}, nil
 		},
 	}
-	service := NewService(repo, codec)
+	service := NewService(repo, codec, nil)
 	first, err := service.ListFollowing(ctx, 2, "", 7)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +260,7 @@ func TestServiceFollowingRejectsInvalidInputBeforeQuery(t *testing.T) {
 		{"negative_limit", -1, "", ErrInvalidLimit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewService(repo, codec).ListFollowing(context.Background(), tc.limit, tc.token, 7); !errors.Is(err, tc.want) {
+			if _, err := NewService(repo, codec, nil).ListFollowing(context.Background(), tc.limit, tc.token, 7); !errors.Is(err, tc.want) {
 				t.Fatalf("error = %v, want %v", err, tc.want)
 			}
 		})
@@ -269,13 +269,13 @@ func TestServiceFollowingRejectsInvalidInputBeforeQuery(t *testing.T) {
 
 func TestServiceFollowingEmptyAndErrors(t *testing.T) {
 	empty := followingRepository{list: func(context.Context, uint64, *Position, int) ([]FeedItem, error) { return nil, nil }}
-	response, err := NewService(empty, testCursorCodec(t)).ListFollowing(context.Background(), 10, "", 7)
+	response, err := NewService(empty, testCursorCodec(t), nil).ListFollowing(context.Background(), 10, "", 7)
 	if err != nil || response.Videos == nil || len(response.Videos) != 0 || response.HasMore || response.NextCursor != "" {
 		t.Fatalf("an empty following feed must be an empty array: %+v, %v", response, err)
 	}
 	failure := errors.New("database unavailable")
 	failing := followingRepository{list: func(context.Context, uint64, *Position, int) ([]FeedItem, error) { return nil, failure }}
-	response, err = NewService(failing, testCursorCodec(t)).ListFollowing(context.Background(), 10, "", 7)
+	response, err = NewService(failing, testCursorCodec(t), nil).ListFollowing(context.Background(), 10, "", 7)
 	if !errors.Is(err, failure) || len(response.Videos) != 0 || response.HasMore {
 		t.Fatalf("failed query returned success data: %+v, %v", response, err)
 	}

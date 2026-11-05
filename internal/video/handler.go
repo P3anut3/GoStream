@@ -1,6 +1,7 @@
 package video
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -23,6 +24,13 @@ type Handler struct { // 持有数据库连接池，后续提供处理方法
 	CommentService *CommentService
 	LikeService    *LikeService
 	VideoService   *VideoService
+	LatestFeed     LatestFeed // 可以为 nil：首页最新流不使用时间线缓存
+}
+
+// LatestFeed 让首页最新流的时间线在作品发布、删除后失效；feed.Service 实现它，main.go 负责装配。
+// 接口定义在使用它的 video 包里，video 包就不需要 import feed 包。
+type LatestFeed interface {
+	InvalidateLatest(ctx context.Context)
 }
 
 type PublishRequest struct { // 接收客户端提交的发布信息
@@ -189,6 +197,10 @@ func (h *Handler) Delete(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": "删除视频失败"})
 		return
 	}
+	// 删除成功后让首页时间线失效，已删除的作品不会继续出现在最新流里。
+	if h.LatestFeed != nil {
+		h.LatestFeed.InvalidateLatest(ctx)
+	}
 	c.Status(http.StatusNoContent)
 }
 
@@ -309,6 +321,10 @@ func (h *Handler) Publish(c *gin.Context) {
 	// 发布成功后清掉这个 ID 可能残留的"不存在"标记，让新作品立刻可见。
 	if h.VideoService != nil {
 		h.VideoService.Forget(ctx, item.ID)
+	}
+	// 首页时间线也要重建，新作品才会出现在最新流里。
+	if h.LatestFeed != nil {
+		h.LatestFeed.InvalidateLatest(ctx)
 	}
 	c.JSON(http.StatusCreated, map[string]interface{}{"id": item.ID, "author_id": authorID, "title": req.Title})
 }

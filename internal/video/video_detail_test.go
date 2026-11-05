@@ -102,7 +102,8 @@ func TestVideoDeleteHandler(t *testing.T) {
 				return tc.deleteErr
 			}}
 			router := gin.New()
-			router.DELETE("/videos/:id", auth.JWTAuth(secret), (&Handler{VideoService: NewVideoService(repo, cache)}).Delete)
+			latest := &fakeLatestFeed{}
+			router.DELETE("/videos/:id", auth.JWTAuth(secret), (&Handler{VideoService: NewVideoService(repo, cache), LatestFeed: latest}).Delete)
 			request := httptest.NewRequest(http.MethodDelete, tc.path, nil)
 			if tc.token != "" {
 				request.Header.Set("Authorization", "Bearer "+tc.token)
@@ -114,13 +115,13 @@ func TestVideoDeleteHandler(t *testing.T) {
 			}
 			_, _, _, deletes := cache.counts()
 			if tc.wantStatus == http.StatusNoContent {
-				if response.Body.Len() != 0 || deletes != 1 {
-					t.Fatalf("204 must have no body and must invalidate the cache (deletes %d)", deletes)
+				if response.Body.Len() != 0 || deletes != 1 || latest.calls != 1 {
+					t.Fatalf("204 must have no body and must invalidate the caches (deletes %d, latest feed %d)", deletes, latest.calls)
 				}
 				return
 			}
-			if deletes != 0 {
-				t.Fatal("a failed delete must not invalidate the cache")
+			if deletes != 0 || latest.calls != 0 {
+				t.Fatal("a failed delete must not invalidate the caches")
 			}
 			var body map[string]string
 			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || body["error"] != tc.wantMessage {

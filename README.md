@@ -20,6 +20,7 @@
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
 - 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流 `GET /feed/following` 与视频库“关注”标签页只展示已关注作者的作品。
 - 视频详情缓存：`GET /videos/:id` 先查进程内缓存（go-cache，5 秒），再查 Redis（Cache-Aside，可选，未配置 Redis 时直接读 MySQL）；未命中时用 singleflight 合并同一视频的并发回源，不存在的 ID 缓存 30 秒“不存在”标记；删除作品后让缓存失效，发布后清除新 ID 的标记，Redis 故障时降级到 MySQL。
+- 最新流时间线缓存：`GET /feed` 先读 Redis 里最新 500 条视频的时间线（有序集合存顺序，哈希存公开字段），超出这 500 条或 Redis 故障时回源 MySQL；作者名和点赞信息每次查询。发布、删除作品后时间线整条失效，下次读取时重建。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。视频详情已通过 go-redis 接入 Redis 缓存；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
 
@@ -283,13 +284,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系、关注流与视频详情缓存的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系、关注流、视频详情缓存与最新流时间线的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -318,6 +319,7 @@ try {
 | `internal/video/upload_test.go` | 上传与公开文件读取测试 |
 | `internal/follow/` | 关注关系的 Handler、Service、Repository 及测试 |
 | `internal/video/video_repository.go`、`video_cache.go`、`video_local_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存、进程内缓存以及 Cache-Aside 与 singleflight 规则 |
+| `internal/feed/timeline.go` | 最新流的 Redis 时间线：按发布时间排序的 ID、公开字段、窗口哨兵与整条重建 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
@@ -328,7 +330,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 进行中：视频详情的 Cache-Aside、本地缓存、singleflight 与空值缓存已完成，接下来是时间线缓存、限流和认证增强，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 进行中：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存以及最新流时间线已完成，接下来是限流和认证增强，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -435,3 +437,13 @@ MySQL 确认视频不存在时，两层缓存都记一个“不存在”标记�
 已知窗口：读请求刚从 MySQL 读到旧数据，随后作品被删除并清除缓存，读请求再把旧数据写回时，旧数据最多保留到 Redis 过期；某次访问查完 MySQL、尚未写标记时恰好发布了这个 ID，标记最多多挡 30 秒。两者概率都很低，由 TTL 兜底。
 
 响应字段和状态码与接入缓存前一致。默认测试覆盖 Cache-Aside 命中与未命中、缓存读写失败降级、先删库后删缓存、Repository 的 SQL 与错误翻译（数据库故障不会被说成“不存在”）、基于 miniredis 的键、过期时间、抖动与“不存在”标记、本地缓存的命中、过期与跨实例陈旧、发布在事务提交后才清标记，以及 Redis 拒绝连接时客户端立即失败。并发测试使用 `testing/synctest`：20 个并发未命中只查一次库，第一个调用方取消后其余调用方仍拿到结果。`TestVideoDetailCacheHTTPIntegration` 用两个路由模拟两个 API 实例，共享 MySQL 和 miniredis，验证本地命中既不查库也不访问 Redis、另一个实例从 Redis 命中、删除后失效并写入“不存在”标记、Redis 停机降级与恢复后回填、发布后新作品立即可见。没有进行压测，不给出命中率或性能提升数值。
+
+### 最新流时间线缓存
+
+`GET /feed`（最新流）的视频列表先问 Redis 时间线，回答不了再查 MySQL；游标、`limit+1` 和作者名、点赞信息的批量补全都不变，作者名、点赞数和“我是否点过赞”每次查 MySQL，不进入所有人共用的缓存。时间线由两个 key 组成：有序集合 `gostream:feed:latest:v1:ids` 的成员是补零到 20 位的视频 ID、分数是发布时间（毫秒）；哈希 `gostream:feed:latest:v1:videos` 存每个视频的公开字段（id、作者、标题、播放和封面地址、发布时间）。同一毫秒发布的视频按成员字典序排，补零后字典序等于数字顺序，所以 Redis 的顺序与 MySQL 的 `ORDER BY created_at DESC, id DESC` 一致；续读按游标的 (发布时间, ID) 取“同一毫秒且 ID 更小的”加“更早的”，两次查询放在同一个 `MULTI` 里，不会用时间减 1 的方式跳过同一时刻的视频。
+
+时间线只保存最新的 500 条（窗口），最底部放一个分数为 0 的哨兵：`end` 表示窗口已包含全部视频，读到它就是没有更多；`more` 表示更早的视频只在 MySQL，翻到窗口之外的那一页回源 MySQL。既没读满一页、也没碰到哨兵，说明时间线不存在或不完整（过期、被删除或内容缺失），这时从 MySQL 读最新的 501 条重建：删除旧的两个 key、写入 ID、哨兵和内容并设置过期在同一个 `MULTI` 中完成，同一进程内并发的重建用 singleflight 合并为一次，共享重建不随第一个调用方取消并有 3 秒超时。窗口大小或过期时间不大于 0 时拒绝写入，因为过期时间为 0 会让时间线永不过期。
+
+作品发布事务提交后、删除成功后，`video` 包通过自己定义的 `LatestFeed` 接口让时间线整条失效（不 import `feed` 包，由 `main.go` 装配），下一次读取时重建。整条时间线 1 分钟过期：重建的请求刚从 MySQL 读完、尚未写回时恰好发布或删除了作品，旧列表可能被写回，新作品最多晚 1 分钟出现、已删除的作品最多多显示 1 分钟。Redis 读写失败时记录日志并回源 MySQL；关注流不使用这条时间线，仍直接查询 MySQL。没有做发布时增量 `ZADD` 的写时维护：`Video.CreatedAt` 由 MySQL 默认值填写，发布时拿不到准确的分数，增量更新还要处理与重建的并发，留作后续优化。
+
+默认测试覆盖：40 条大量同一秒发布的视频按 1、2、3、7、50 条一页翻到底与 MySQL 顺序完全一致；补零成员、毫秒分数、只缓存公开字段和过期时间；窗口内、跨越窗口底部、窗口之外的页面；从未建立、被删除、只缺内容或只缺顺序时判为需要重建；空列表；拒绝无效配置；损坏数据与 Redis 故障。Service 测试覆盖命中不查视频表、缺失时只重建一次、超出窗口与各种失败回源 MySQL、关注流不使用时间线，并用 `testing/synctest` 验证 20 个并发请求只重建一次、第一个调用方取消后重建继续。`TestLatestFeedTimelineHTTPIntegration` 用带与不带 Redis 的两个路由读同一份 MySQL 数据，逐页比较响应完全一致；完整翻页只查询一次视频表（重建），预热后游客翻页不查询视频表；登录用户与游客的点赞状态各自正确；发布和删除后下一次读取重建并反映变化；Redis 停机时每页回源 MySQL 且结果一致。没有进行压测，不给出性能提升数值。
