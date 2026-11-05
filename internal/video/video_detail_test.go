@@ -18,12 +18,14 @@ func TestVideoDetailHandler(t *testing.T) {
 	for _, tc := range []struct {
 		name, path  string
 		findErr     error
+		marked      bool // the cache already remembers video 42 as missing
 		wantStatus  int
 		wantMessage string
 		wantFind    bool
 	}{
 		{name: "found", path: "/videos/42", wantStatus: 200, wantFind: true},
 		{name: "missing_is_404", path: "/videos/42", findErr: ErrVideoNotFound, wantStatus: 404, wantMessage: "视频不存在", wantFind: true},
+		{name: "cached_missing_is_404_without_query", path: "/videos/42", marked: true, wantStatus: 404, wantMessage: "视频不存在"},
 		{name: "database_error_is_safe_500", path: "/videos/42", findErr: errors.New("private database details"), wantStatus: 500, wantMessage: "视频查询失败", wantFind: true},
 		{name: "invalid_id_is_400", path: "/videos/abc", wantStatus: 400, wantMessage: "视频ID必须是正整数"},
 	} {
@@ -36,8 +38,12 @@ func TestVideoDetailHandler(t *testing.T) {
 				}
 				return stored, tc.findErr
 			}}
+			cache := newFakeVideoCache()
+			if tc.marked {
+				cache.items[42] = nil
+			}
 			router := gin.New()
-			router.GET("/videos/:id", (&Handler{VideoService: NewVideoService(repo, newFakeVideoCache())}).GetByID)
+			router.GET("/videos/:id", (&Handler{VideoService: NewVideoService(repo, cache)}).GetByID)
 			response := httptest.NewRecorder()
 			router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, tc.path, nil))
 			if response.Code != tc.wantStatus || found != tc.wantFind {
@@ -86,7 +92,8 @@ func TestVideoDeleteHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			deleted := false
 			cache := newFakeVideoCache()
-			cache.items[42] = storedTestVideo()
+			cached := storedTestVideo()
+			cache.items[42] = &cached
 			repo := &fakeVideoRepository{deleteOwned: func(_ context.Context, id, authorID uint64) error {
 				deleted = true
 				if id != 42 || authorID != 7 {
@@ -105,13 +112,14 @@ func TestVideoDeleteHandler(t *testing.T) {
 			if response.Code != tc.wantStatus || deleted != tc.wantDelete {
 				t.Fatalf("status %d (deleted %v), want %d (deleted %v): %s", response.Code, deleted, tc.wantStatus, tc.wantDelete, response.Body.String())
 			}
+			_, _, _, deletes := cache.counts()
 			if tc.wantStatus == http.StatusNoContent {
-				if response.Body.Len() != 0 || cache.deletes != 1 {
-					t.Fatalf("204 must have no body and must invalidate the cache (deletes %d)", cache.deletes)
+				if response.Body.Len() != 0 || deletes != 1 {
+					t.Fatalf("204 must have no body and must invalidate the cache (deletes %d)", deletes)
 				}
 				return
 			}
-			if cache.deletes != 0 {
+			if deletes != 0 {
 				t.Fatal("a failed delete must not invalidate the cache")
 			}
 			var body map[string]string

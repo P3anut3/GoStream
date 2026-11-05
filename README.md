@@ -19,7 +19,7 @@
 - MP4 上传：非空、最大 100 MiB、后缀与文件头初步识别、随机文件名和本地保存。
 - 本地前端：注册登录、当前用户、上传并发布、本人已上传地址发布、公共及我的视频列表、详情播放与作者删除。
 - 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流 `GET /feed/following` 与视频库“关注”标签页只展示已关注作者的作品。
-- 视频详情缓存：`GET /videos/:id` 使用 Redis Cache-Aside（可选，未配置 Redis 时直接读 MySQL）；删除作品后让缓存失效，Redis 故障时降级到 MySQL。
+- 视频详情缓存：`GET /videos/:id` 先查进程内缓存（go-cache，5 秒），再查 Redis（Cache-Aside，可选，未配置 Redis 时直接读 MySQL）；未命中时用 singleflight 合并同一视频的并发回源，不存在的 ID 缓存 30 秒“不存在”标记；删除作品后让缓存失效，发布后清除新 ID 的标记，Redis 故障时降级到 MySQL。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。视频详情已通过 go-redis 接入 Redis 缓存；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
 
@@ -317,7 +317,7 @@ try {
 | `internal/video/storage.go`、`storage_test.go` | 文件保存和测试 |
 | `internal/video/upload_test.go` | 上传与公开文件读取测试 |
 | `internal/follow/` | 关注关系的 Handler、Service、Repository 及测试 |
-| `internal/video/video_repository.go`、`video_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存和 Cache-Aside 规则 |
+| `internal/video/video_repository.go`、`video_cache.go`、`video_local_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存、进程内缓存以及 Cache-Aside 与 singleflight 规则 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
@@ -328,7 +328,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 进行中：视频详情 Cache-Aside 已完成，接下来是本地缓存与 singleflight、时间线缓存、限流和认证增强，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 进行中：视频详情的 Cache-Aside、本地缓存、singleflight 与空值缓存已完成，接下来是时间线缓存、限流和认证增强，随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、登录限流、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -424,6 +424,14 @@ Service 的错误不包含 HTTP 状态码；Handler 将内容无效映射为 400
 
 ### 视频详情缓存
 
-`GET /videos/:id` 由 `VideoService` 按 Cache-Aside 读取：先查 Redis 键 `gostream:video:v1:{id}`，命中直接返回；未命中再查 MySQL，并把公开字段（id、作者、标题、播放和封面地址、发布时间）写回 Redis，过期时间为 10 分钟加 0～60 秒随机值，避免大量键同时过期。点赞数和“我是否点赞”等个人或易变数据不进入缓存。`DELETE /videos/:id` 先删数据库记录，成功后再删除缓存；删除缓存失败时只记日志，旧数据最多保留到过期（不超过 11 分钟），这是明确的失效窗口，不是强一致。Redis 读写失败一律记日志并降级到 MySQL，详情页不因缓存故障不可用；Redis 客户端使用短超时、不重试，就绪检查不包含 Redis。暂不缓存“不存在”的 ID，空值缓存与 singleflight 在 M3 后续步骤加入。
+`GET /videos/:id` 由 `VideoService` 按 Cache-Aside 读取：先查 Redis 键 `gostream:video:v1:{id}`，命中直接返回；未命中再查 MySQL，并把公开字段（id、作者、标题、播放和封面地址、发布时间）写回 Redis，过期时间为 10 分钟加 0～60 秒随机值，避免大量键同时过期。点赞数和“我是否点赞”等个人或易变数据不进入缓存。`DELETE /videos/:id` 先删数据库记录，成功后再删除缓存；删除缓存失败时只记日志，旧数据最多保留到过期（不超过 11 分钟），这是明确的失效窗口，不是强一致。Redis 读写失败一律记日志并降级到 MySQL，详情页不因缓存故障不可用；Redis 客户端使用短超时，命令和建连都不重试，就绪检查不包含 Redis。go-redis 默认建连失败会再试 5 次、每次间隔 100ms，而 `DialerRetries` 小于等于 0 都按默认处理，所以必须显式设为 1：实测 Redis 拒绝连接时，默认配置下一次缓存读取要约 400ms 才失败，设为 1 后不到 10ms。
 
-响应字段和状态码与接入缓存前一致。默认测试覆盖 Cache-Aside 命中与未命中、缓存读写失败降级、先删库后删缓存、Repository 的 SQL 与错误翻译（数据库故障不会被说成“不存在”）以及基于 miniredis 的键、过期时间与抖动；`TestVideoDetailCacheHTTPIntegration` 通过真实路由和 MySQL 验证命中不查库、Redis 停机降级、恢复后重新命中和删除后失效。没有进行压测，不给出命中率或性能提升数值。
+Redis 前面还有一层进程内缓存 `LocalVideoCache`（go-cache，5 秒）。它同样实现 `VideoCache` 接口并包在 Redis 外面，Service 不知道缓存有两层；本地命中时不访问 Redis。代价是每个进程各有一份本地缓存，互不通知：某个实例删除或发布作品后，其他实例最多 5 秒内仍可能返回旧结果。
+
+两层都未命中时，`singleflight` 按视频 ID 合并同一进程内的并发回源（防缓存击穿）：同一时刻只有一次 MySQL 查询，其余请求等待共享结果。共享查询用 `context.WithoutCancel` 保留请求上下文里的值，但不随第一个调用方取消，另有 3 秒超时；每个调用方仍可自行放弃等待。合并只在单个进程内有效，N 个实例最多同时查 N 次。
+
+MySQL 确认视频不存在时，两层缓存都记一个“不存在”标记（Redis 中的值为 `missing`，30 秒；本地为 nil 指针），重复访问同一个不存在的 ID 不再查库（防缓存穿透）；数据库报错时不写标记。`MissingTTL` 未配置时不写标记，因为 Redis 中过期时间为 0 表示永不过期。发布作品的事务提交后会清除新 ID 的缓存，避免发布前被访问过的 ID 在发布后仍返回 404；清除必须在提交之后，否则并发读取可能把标记写回。
+
+已知窗口：读请求刚从 MySQL 读到旧数据，随后作品被删除并清除缓存，读请求再把旧数据写回时，旧数据最多保留到 Redis 过期；某次访问查完 MySQL、尚未写标记时恰好发布了这个 ID，标记最多多挡 30 秒。两者概率都很低，由 TTL 兜底。
+
+响应字段和状态码与接入缓存前一致。默认测试覆盖 Cache-Aside 命中与未命中、缓存读写失败降级、先删库后删缓存、Repository 的 SQL 与错误翻译（数据库故障不会被说成“不存在”）、基于 miniredis 的键、过期时间、抖动与“不存在”标记、本地缓存的命中、过期与跨实例陈旧、发布在事务提交后才清标记，以及 Redis 拒绝连接时客户端立即失败。并发测试使用 `testing/synctest`：20 个并发未命中只查一次库，第一个调用方取消后其余调用方仍拿到结果。`TestVideoDetailCacheHTTPIntegration` 用两个路由模拟两个 API 实例，共享 MySQL 和 miniredis，验证本地命中既不查库也不访问 Redis、另一个实例从 Redis 命中、删除后失效并写入“不存在”标记、Redis 停机降级与恢复后回填、发布后新作品立即可见。没有进行压测，不给出命中率或性能提升数值。

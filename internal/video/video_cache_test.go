@@ -15,28 +15,25 @@ func newTestVideoCache(t *testing.T) (*RedisVideoCache, *miniredis.Miniredis) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
 	t.Cleanup(func() { client.Close() })
-	return &RedisVideoCache{Client: client, TTL: 10 * time.Minute, Jitter: time.Minute}, server
+	return &RedisVideoCache{Client: client, TTL: 10 * time.Minute, Jitter: time.Minute, MissingTTL: 30 * time.Second}, server
 }
 
 func TestRedisVideoCacheRoundTripAndExpiry(t *testing.T) {
 	cache, server := newTestVideoCache(t)
 	ctx := context.Background()
-	if _, hit, err := cache.Get(ctx, 42); err != nil || hit {
-		t.Fatalf("a missing key must be a miss, not an error: hit %v, err %v", hit, err)
+	if video, hit, err := cache.Get(ctx, 42); err != nil || hit || video != nil {
+		t.Fatalf("a missing key must be a miss, not an error: %v, hit %v, err %v", video, hit, err)
 	}
 	video := Video{ID: 42, AuthorID: 7, Title: "缓存 <测试>", PlayURL: "/media/videos/a.mp4", CoverURL: "/cover.svg", CreatedAt: time.Date(2026, 11, 3, 10, 0, 0, 123000000, time.UTC)}
 	if err := cache.Set(ctx, video); err != nil {
 		t.Fatal(err)
 	}
 	key := "gostream:video:v1:42"
-	if !server.Exists(key) {
-		t.Fatalf("expected key %s", key)
-	}
 	if ttl := server.TTL(key); ttl < 10*time.Minute || ttl >= 11*time.Minute {
 		t.Fatalf("TTL %v must be within [10m, 11m)", ttl)
 	}
 	got, hit, err := cache.Get(ctx, 42)
-	if err != nil || !hit || got.ID != 42 || got.AuthorID != 7 || got.Title != video.Title || got.PlayURL != video.PlayURL || got.CoverURL != video.CoverURL || !got.CreatedAt.Equal(video.CreatedAt) {
+	if err != nil || !hit || got == nil || got.ID != 42 || got.AuthorID != 7 || got.Title != video.Title || got.PlayURL != video.PlayURL || got.CoverURL != video.CoverURL || !got.CreatedAt.Equal(video.CreatedAt) {
 		t.Fatalf("round trip changed the video: %+v, hit %v, err %v", got, hit, err)
 	}
 	if err := cache.Delete(ctx, 42); err != nil || server.Exists(key) {
@@ -44,6 +41,36 @@ func TestRedisVideoCacheRoundTripAndExpiry(t *testing.T) {
 	}
 	if err := cache.Delete(ctx, 42); err != nil {
 		t.Fatalf("deleting a missing key must succeed: %v", err)
+	}
+}
+
+func TestRedisVideoCacheMissingMarker(t *testing.T) {
+	cache, server := newTestVideoCache(t)
+	ctx := context.Background()
+	if err := cache.SetMissing(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	key := "gostream:video:v1:7"
+	if value, err := server.Get(key); err != nil || value != "missing" {
+		t.Fatalf("expected the missing marker, got %q, %v", value, err)
+	}
+	if ttl := server.TTL(key); ttl <= 0 || ttl > 30*time.Second {
+		t.Fatalf("the marker must be short-lived, TTL %v", ttl)
+	}
+	// A marker is a hit without a video, so the service answers 404 without MySQL.
+	if video, hit, err := cache.Get(ctx, 7); err != nil || !hit || video != nil {
+		t.Fatalf("marker must read as (nil, true, nil): %v, %v, %v", video, hit, err)
+	}
+	if err := cache.Delete(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit, err := cache.Get(ctx, 7); err != nil || hit {
+		t.Fatal("deleting the marker must turn it back into a miss")
+	}
+	// Without a TTL the marker would never expire and would hide a video published later with this ID.
+	cache.MissingTTL = 0
+	if err := cache.SetMissing(ctx, 8); err != nil || server.Exists("gostream:video:v1:8") {
+		t.Fatalf("a marker without a TTL must not be written: %v", err)
 	}
 }
 
@@ -78,6 +105,9 @@ func TestRedisVideoCacheErrors(t *testing.T) {
 	}
 	if err := cache.Set(ctx, Video{ID: 7}); err == nil {
 		t.Fatal("Set must fail while Redis is down")
+	}
+	if err := cache.SetMissing(ctx, 7); err == nil {
+		t.Fatal("SetMissing must fail while Redis is down")
 	}
 	if err := cache.Delete(ctx, 7); err == nil {
 		t.Fatal("Delete must fail while Redis is down")

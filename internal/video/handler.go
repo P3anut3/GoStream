@@ -306,6 +306,10 @@ func (h *Handler) Publish(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, map[string]string{"error": "发布视频失败"})
 		return
 	}
+	// 发布成功后清掉这个 ID 可能残留的"不存在"标记，让新作品立刻可见。
+	if h.VideoService != nil {
+		h.VideoService.Forget(ctx, item.ID)
+	}
 	c.JSON(http.StatusCreated, map[string]interface{}{"id": item.ID, "author_id": authorID, "title": req.Title})
 }
 

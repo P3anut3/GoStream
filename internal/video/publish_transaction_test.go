@@ -44,7 +44,10 @@ func TestPublishTransaction(t *testing.T) {
 			store := &publishTransactionStore{t: t, videoStatus: tc.videoStatus, coverStatus: tc.coverStatus, fail: tc.fail}
 			db := sql.OpenDB(store)
 			t.Cleanup(func() { db.Close() })
-			handler := &Handler{DB: database.WrapSQL(db)}
+			// Someone probed the next ID (99) before it was published, leaving a "missing" marker.
+			cache := &commitCheckingCache{fakeVideoCache: newFakeVideoCache(), store: store}
+			cache.items[99] = nil
+			handler := &Handler{DB: database.WrapSQL(db), VideoService: NewVideoService(&fakeVideoRepository{}, cache)}
 			h := gin.New()
 			h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
 			coverURL := "/cover.svg"
@@ -64,9 +67,15 @@ func TestPublishTransaction(t *testing.T) {
 				if !store.committed || store.rolledBack || !store.inserted || !store.videoUpdated || store.coverUpdated != tc.cover {
 					t.Error("success must commit the video and all supplied upload statuses")
 				}
+				if _, marked := cache.items[99]; marked || !cache.clearedAfterCommit {
+					t.Error("publishing must clear the new video's missing marker after the commit")
+				}
 			} else {
 				if store.committed || !store.rolledBack {
 					t.Error("failure must rollback without committing partial changes")
+				}
+				if _, _, _, deletes := cache.counts(); deletes != 0 {
+					t.Error("a failed publish must not touch the cache")
 				}
 			}
 			if strings.Contains(string(resp.Body()), "private storage failure") {
@@ -74,6 +83,19 @@ func TestPublishTransaction(t *testing.T) {
 			}
 		})
 	}
+}
+
+// commitCheckingCache records whether the transaction had committed when the cache was cleared:
+// clearing before the commit would let a concurrent read put the marker straight back.
+type commitCheckingCache struct {
+	*fakeVideoCache
+	store              *publishTransactionStore
+	clearedAfterCommit bool
+}
+
+func (c *commitCheckingCache) Delete(ctx context.Context, id uint64) error {
+	c.clearedAfterCommit = c.store.committed
+	return c.fakeVideoCache.Delete(ctx, id)
 }
 
 // A transactional driver injects failures at each stage and observes Commit/Rollback.

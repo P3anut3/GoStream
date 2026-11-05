@@ -29,7 +29,7 @@
 | Gin / GORM / MySQL / JWT / bcrypt | HTTP、ORM、业务持久化、认证 | 已使用；Gin/GORM 等核心组件已对齐 | 持续使用，不为匹配旧补丁版本降级 |
 | YAML / dotenv | 配置及环境覆盖 | 已有同类能力；当前 goccy/go-yaml，参考直接使用 gopkg.in/yaml.v3 | 若要求具体解析库也一致，M1 收尾时小范围迁移并保留严格解析测试 |
 | go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside 已接入（go-redis v9）；时间线、热榜、限流、Token 状态未做 | M3 继续，分片会话在 M5 |
-| go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 未使用；间接依赖中出现 x/sync 不代表实现了合并 | M3，在基础 Cache-Aside 之后 |
+| go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；没有跨实例合并 | 时间线等后续缓存按需复用 |
 | amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | Compose 环境和持久消息测试通过；Go AMQP Client 未接入 | M4 |
 | Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 没有消息 Worker 或 Outbox；清理命令不是消息消费者 | M4 |
 | SSE / 通知 | 通知持久化、列表/未读/已读与实时流 | 未实现 | M4，先有通知数据与鉴权再推送 |

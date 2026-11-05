@@ -80,15 +80,7 @@ func openRedis(cfg config.RedisConfig) *redis.Client {
 		log.Printf("未配置 Redis，视频缓存已关闭")
 		return nil
 	}
-	client := redis.NewClient(&redis.Options{
-		Addr:     cfg.Addr,
-		Password: cfg.Password,
-		// 缓存不能比直接查数据库更慢：超时要短，失败不重试，尽快降级。
-		DialTimeout:  time.Second,
-		ReadTimeout:  300 * time.Millisecond,
-		WriteTimeout: 300 * time.Millisecond,
-		MaxRetries:   -1,
-	})
+	client := newRedisClient(cfg.Addr, cfg.Password)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
@@ -97,6 +89,21 @@ func openRedis(cfg config.RedisConfig) *redis.Client {
 		log.Printf("已连接 Redis 缓存 %s", cfg.Addr)
 	}
 	return client
+}
+
+// newRedisClient 的配置原则：缓存不能比直接查数据库更慢，超时要短、失败不重试，出问题就尽快降级。
+func newRedisClient(addr, password string) *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:         addr,
+		Password:     password,
+		DialTimeout:  time.Second,
+		ReadTimeout:  300 * time.Millisecond,
+		WriteTimeout: 300 * time.Millisecond,
+		MaxRetries:   -1, // 命令失败不重试
+		// 建连失败也只试一次：默认会试 5 次、每次间隔 100ms，Redis 停掉时每次缓存操作要多等约 0.4 秒。
+		// 这个字段 <= 0 都按默认 5 次处理，所以要明确写 1。
+		DialerRetries: 1,
+	})
 }
 
 func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client) *gin.Engine {
@@ -114,7 +121,9 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	// 没有 Redis 时必须传"无类型的 nil"接口；把 nil 指针装进接口会让 cache != nil 成立。
 	var videoCache video.VideoCache
 	if redisClient != nil {
-		videoCache = &video.RedisVideoCache{Client: redisClient, TTL: 10 * time.Minute, Jitter: time.Minute}
+		// 两层缓存：进程内 5 秒挡住热点，Redis 10 分钟；"不存在"标记只保留 30 秒。
+		redisCache := &video.RedisVideoCache{Client: redisClient, TTL: 10 * time.Minute, Jitter: time.Minute, MissingTTL: 30 * time.Second}
+		videoCache = video.NewLocalVideoCache(redisCache, 5*time.Second)
 	}
 	videos := &video.Handler{DB: db, UploadDir: storage.VideoDir, CoverDir: storage.CoverDir,
 		CommentService: video.NewCommentService(&video.SQLCommentRepository{DB: db}),
