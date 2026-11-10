@@ -28,7 +28,7 @@
 | --- | --- | --- | --- |
 | Gin / GORM / MySQL / JWT / bcrypt | HTTP、ORM、业务持久化、认证 | 已使用；Gin/GORM 等核心组件已对齐 | 持续使用，不为匹配旧补丁版本降级 |
 | YAML / dotenv | 配置及环境覆盖 | 已有同类能力；当前 goccy/go-yaml，参考直接使用 gopkg.in/yaml.v3 | 若要求具体解析库也一致，M1 收尾时小范围迁移并保留严格解析测试 |
-| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside 与最新流时间线已接入（go-redis v9）；热榜、限流、Token 状态未做 | M3 继续，分片会话在 M5 |
+| go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside、最新流时间线与限流计数已接入（go-redis v9）；热榜、Token 状态未做 | M3 继续，分片会话在 M5 |
 | go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；最新流时间线的重建也用 singleflight 合并；没有跨实例合并 | 后续缓存按需复用 |
 | amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | Compose 环境和持久消息测试通过；Go AMQP Client 未接入 | M4 |
 | Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 没有消息 Worker 或 Outbox；清理命令不是消息消费者 | M4 |
@@ -47,7 +47,7 @@
 | 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 关注/取关/状态与关注流已实现；粉丝列表/计数待做 |
 | 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果 |
 | 分片、进度查询、合并、恢复上传 | video/chunk_handler.go | 高：完整技术栈对齐的一部分，但在 Redis 基础后做 |
-| Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 中高：放在 Redis 阶段，明确过期/刷新/撤销语义 |
+| Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 限流已在 M3 实现（internal/ratelimit：固定窗口，Redis 故障降级为单机计数）；刷新与撤销仍为中高优先级，明确过期/刷新/撤销语义 |
 | 点赞榜、热榜、话题流 | feed 的排行/快照/ZSET 和 ListByTag | 可在缓存/事件基础完成后扩展，热度统计与 MQ 结合 |
 | 头像、简介、改名改密、主页统计、已赞列表 | account、video/like | 后续补齐普通业务，不阻塞核心中间件主线 |
 | 私信、评论 @ 提及 | message/handler.go、comment_service.go | 后置，可选功能；用户目标允许功能不全部复刻 |

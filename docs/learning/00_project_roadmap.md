@@ -46,8 +46,9 @@ flowchart LR
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
 | 关注关系 | internal/follow、scripts/migrations/006_follows.sql | 关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成与端到端测试；详情页关注按钮与关注流（GET /feed/following、关注标签页）已通过夹具与真实浏览器验收 | 粉丝列表/计数可后续扩展 |
-| 视频详情缓存 | internal/video/video_{repository,cache,local_cache,service}.go、cmd/server/main.go | Redis Cache-Aside、删除后失效、Redis 故障降级；go-cache 5 秒本地缓存、singleflight 合并回源、30 秒“不存在”标记、发布后清标记均已完成，miniredis、MySQL 端到端与真实 Redis 验证通过 | 限流 |
+| 视频详情缓存 | internal/video/video_{repository,cache,local_cache,service}.go、cmd/server/main.go | Redis Cache-Aside、删除后失效、Redis 故障降级；go-cache 5 秒本地缓存、singleflight 合并回源、30 秒“不存在”标记、发布后清标记均已完成，miniredis、MySQL 端到端与真实 Redis 验证通过 | — |
 | 最新流时间线 | internal/feed/timeline.go、service.go、internal/video/handler.go、cmd/server/main.go | Redis 时间线缓存最新 500 条（ZSET 存补零 ID 与毫秒发布时间、HASH 存公开字段、底部哨兵 end/more），发布/删除后整条失效、读时 singleflight 重建，超出窗口或故障回源 MySQL；miniredis、与无缓存路径逐页对比的 MySQL 端到端、真实 Redis 与隔离 Compose 浏览器验收通过 | 发布时增量更新、关注流 |
+| 限流 | internal/ratelimit/limiter.go、middleware.go、cmd/server/main.go | 固定窗口计数（MULTI 里 INCR + EXPIRE NX + PTTL）；登录、注册按 IP，写操作按用户共用额度；超限 429 + Retry-After；Redis 故障降级为单机计数；miniredis、单机并发计数、路由限额与 Redis 停机测试、真实 Redis 与隔离 Compose 浏览器验收通过 | 滑动窗口或令牌桶、按账号限流、熔断 |
 | RabbitMQ、SSE | compose.yaml 提供 MQ 容器，尚无业务 Client | MQ 环境已验收；业务未实现 | M4 |
 | 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
@@ -147,6 +148,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 进度（2026-11-04）：第一步完成。GET /videos/:id 使用 Redis Cache-Aside（key gostream:video:v1:{id}，TTL 10 分钟加 0～60 秒抖动），删除先删库再删缓存，Redis 故障降级到 MySQL；单元、miniredis、MySQL 端到端、gostream-dev 真实 Redis 与隔离 Compose 浏览器验收通过。下一步：本地缓存与 singleflight、空值缓存。
 - 进度（2026-11-05）：第二步完成。Redis 前加 go-cache 5 秒本地缓存（多实例最多陈旧 5 秒）；singleflight 合并单进程内同一 ID 的并发回源，共享查询不随第一个调用方取消，并有 3 秒超时；MySQL 确认不存在时写 30 秒标记防穿透，发布事务提交后清除；Redis 客户端建连也不重试。单元、synctest 并发、MySQL 端到端（两个实例共享 Redis）、gostream-dev 真实 Redis 与隔离 Compose 浏览器验收通过。下一步：时间线缓存。
 - 进度（2026-11-06）：第三步完成。最新流先读 Redis 时间线：有序集合按毫秒发布时间存补零到 20 位的视频 ID（同一毫秒按 ID 倒序，与 MySQL 组合排序一致），哈希存公开字段，只保存最新 500 条，底部哨兵区分“到底了”和“更早的回 MySQL”；续读取“同一毫秒且 ID 更小”加“更早”的两段，不用时间减 1；作者名与点赞信息仍每次查 MySQL。发布、删除后整条失效，读时 singleflight 重建（读 501 行），1 分钟过期兜底并发重建写回旧列表的窗口。单元、synctest 并发、与无缓存路径逐页对比的 MySQL 端到端、gostream-dev 真实 Redis（换镜像前后首页逐字节一致）与隔离 Compose 浏览器验收通过。下一步：限流。
+- 进度（2026-11-10）：第四步完成。新增 internal/ratelimit：固定窗口计数在同一个 MULTI 里执行 INCR、EXPIRE … NX、PTTL，窗口从第一次请求开始，被拒绝的请求不延长窗口，也不会留下没有过期时间的计数器；登录每个 IP 每分钟 10 次、注册每个 IP 每小时 10 个、写操作每个用户每分钟共 60 次，超限返回 429 + Retry-After（向上取整）；Redis 故障时 FailoverLimiter 降级为 go-cache 单机计数，未配置 Redis 时只用单机计数；规则无效启动即 panic，写操作缺少用户 ID 返回 500。单元、单机并发计数、两种装配下的路由限额与 Redis 停机测试、gostream-dev 真实 Redis（第 11 次登录返回 429，计数器 TTL 59 秒，验证后已删除）与隔离 Compose 浏览器验收通过。下一步：认证刷新与撤销。
 
 ### M4：异步事件、Worker 与通知
 
@@ -184,7 +186,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 | YAML / env | API/清理命令已接入加载、覆盖和校验 | M1 | 统一配置与部署覆盖 |
 | Vue 3 / TS / Pinia / Router / Vite | 已迁移并通过真实浏览器验收，Vite 8 原生 Rolldown | M1 | 可维护的展示和验收客户端 |
 | Docker Compose | 四服务编排和持久化重建测试通过 | M1 | 隔离且可复现的环境 |
-| go-redis / Redis | 视频详情 Cache-Aside 与最新流时间线已使用（go-redis v9），测试用 miniredis | M3 | 缓存、时间线、限流、后续上传会话 |
+| go-redis / Redis | 视频详情 Cache-Aside、最新流时间线与限流计数已使用（go-redis v9），测试用 miniredis | M3 | 缓存、时间线、限流、后续上传会话 |
 | go-cache / singleflight | 视频详情已使用：go-cache 5 秒本地缓存，x/sync singleflight 合并单进程内的回源 | M3 | 短时本地缓存和进程内回源合并 |
 | amqp091-go / RabbitMQ / Worker | RabbitMQ 容器已准备，Go 业务与 Worker 未实现 | M4 | 可靠异步通知与后续事件处理 |
 | SSE | 未实现 | M4 | 通知即时提示与重连补读 |

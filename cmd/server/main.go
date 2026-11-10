@@ -17,6 +17,7 @@ import (
 	"gostream/internal/feed"
 	"gostream/internal/follow"
 	"gostream/internal/httpx"
+	"gostream/internal/ratelimit"
 	"gostream/internal/user"
 	"gostream/internal/video"
 
@@ -141,29 +142,38 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	followService := follow.NewService(followRepository)
 	followHandler := follow.NewHandler(followService)
 	jwt := auth.JWTAuth(secret)
+	// 限流：有 Redis 时所有实例共用计数，Redis 出错就降级为单机计数；没有 Redis 时只做单机计数。
+	var limiter ratelimit.Limiter = ratelimit.NewLocalLimiter()
+	if redisClient != nil {
+		limiter = &ratelimit.FailoverLimiter{Primary: &ratelimit.RedisLimiter{Client: redisClient}, Fallback: limiter}
+	}
+	loginLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "login", Limit: 10, Window: time.Minute}, ratelimit.ByIP)
+	registerLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "register", Limit: 10, Window: time.Hour}, ratelimit.ByIP)
+	// 写操作共用一个额度，并且要排在 jwt 后面：按 jwt 放进上下文的用户 ID 计数。
+	writeLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "write", Limit: 60, Window: time.Minute}, ratelimit.ByUser)
 	router.GET("/healthz", health.Live)
 	router.GET("/readyz", health.Ready(db))
 	router.GET("/feed", auth.OptionalJWTAuth(secret), feedHandler.ListLatest)
 	router.GET("/feed/following", jwt, feedHandler.ListFollowing)
-	router.POST("/users", users.CreateUser)
-	router.POST("/login", users.Login)
+	router.POST("/users", registerLimit, users.CreateUser)
+	router.POST("/login", loginLimit, users.Login)
 	router.GET("/me", jwt, users.Me)
-	router.POST("/videos", jwt, videos.Publish)
+	router.POST("/videos", jwt, writeLimit, videos.Publish)
 	router.GET("/videos", videos.List)
 	router.GET("/videos/:id", videos.GetByID)
 	router.GET("/me/videos", jwt, videos.ListMine)
-	router.DELETE("/videos/:id", jwt, videos.Delete)
-	router.POST("/uploads/videos", jwt, videos.Upload)
-	router.POST("/uploads/covers", jwt, videos.UploadCover)
-	router.PUT("/videos/:id/like", jwt, videos.Like)
+	router.DELETE("/videos/:id", jwt, writeLimit, videos.Delete)
+	router.POST("/uploads/videos", jwt, writeLimit, videos.Upload)
+	router.POST("/uploads/covers", jwt, writeLimit, videos.UploadCover)
+	router.PUT("/videos/:id/like", jwt, writeLimit, videos.Like)
 	router.GET("/videos/:id/like", jwt, videos.GetLikeStatus)
-	router.DELETE("/videos/:id/like", jwt, videos.UnLike)
-	router.POST("/videos/:id/comments", jwt, videos.CreateComment)
+	router.DELETE("/videos/:id/like", jwt, writeLimit, videos.UnLike)
+	router.POST("/videos/:id/comments", jwt, writeLimit, videos.CreateComment)
 	router.GET("/videos/:id/comments", videos.ListComments)
-	router.DELETE("/comments/:id", jwt, videos.DeleteComment)
-	router.PUT("/users/:id/follow", jwt, followHandler.Follow)
+	router.DELETE("/comments/:id", jwt, writeLimit, videos.DeleteComment)
+	router.PUT("/users/:id/follow", jwt, writeLimit, followHandler.Follow)
 	router.GET("/users/:id/follow", jwt, followHandler.GetStatus)
-	router.DELETE("/users/:id/follow", jwt, followHandler.Unfollow)
+	router.DELETE("/users/:id/follow", jwt, writeLimit, followHandler.Unfollow)
 	httpx.RegisterWeb(router, "web/dist")
 	httpx.RegisterMedia(router, "/media/videos", videos.UploadDir)
 	httpx.RegisterMedia(router, "/media/covers", videos.CoverDir)

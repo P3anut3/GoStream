@@ -31,7 +31,8 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 流程：绑定凭据 → Service 校验 → Repository 查询/保存 → 校验密码 → Handler 签发 JWT。
 - 关键失败：重复用户名、错误凭据、token 过期、用户已不存在、数据库故障。
 - 当前限制：页面退出清除本页 token；不等于服务端撤销已签发 token。刷新 token/强制下线不是当前已有功能。
-- 后续：输入边界、登录限流，若实现撤销则明确 Redis 会话与 JWT 有效期策略。
+- 登录限流（M3 已实现）：POST /login 按客户端 IP 每分钟 10 次、POST /users 每小时 10 个，由 internal/ratelimit 的 Gin 中间件在 Handler 之前判断，超限返回 429 + Retry-After，不会走到 bcrypt；Redis 故障时降级为单机计数。没有按账号限流（会被用来锁住别人的账号）。
+- 后续：输入边界；若实现撤销则明确 Redis 会话与 JWT 有效期策略。
 - 验收：错误密码不成功，响应不带哈希，非法身份不能写操作；登录限流故障策略可解释。
 
 ## 3. 上传与媒体访问
