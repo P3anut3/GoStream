@@ -51,7 +51,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 
 | 模块 | 当前能力 | 源码及边界 |
 | --- | --- | --- |
-| 用户与认证 | 注册、登录、当前用户、bcrypt、HS256 JWT、Bearer 中间件 | `internal/user`、`internal/auth`；用户模块已分层；token 有效期两小时，无 refresh token 和服务端撤销 |
+| 用户与认证 | 注册、登录、当前用户、bcrypt、HS256 JWT、Bearer 中间件、refresh token 刷新与退出 | `internal/user`、`internal/auth`；用户模块已分层；access token 15 分钟并带会话 ID；refresh token 在 HttpOnly Cookie 里，7 天滑动过期，每次刷新都轮换，重复使用会注销会话；中间件每个请求确认会话还在 |
 | 上传 | MP4 最大 100 MiB；JPEG/PNG 封面最大 5 MiB；校验、随机名、本地保存与上传记录 | `internal/video/handler.go`、`cover.go`、`storage.go`；普通上传，不是分片或对象存储 |
 | 发布 | 校验视频/封面归属，事务与行锁，创建作品并更新上传状态 | `internal/video/handler.go`、`upload_repository.go`；当前没有管理员审核 |
 | 作品管理 | 公共列表、详情、我的视频、仅作者删除 | 部分仍直接在 Handler 使用 GORM，不宣称全项目已统一分层 |
@@ -71,12 +71,12 @@ https://github.com/LeoninCS/feedsystem_video_go
 
 重要边界：
 
-- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；关注流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
+- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；登录会话存在 Redis（故障时已登录的请求按签名放行，登录和刷新返回 503）；关注流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
 - 没有 notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
 - 媒体公开可读；未发布文件知道地址也能访问。前端隐藏按钮不等于后端授权。
-- 当前退出只清除前端内存凭证，不能撤销已签发 JWT。
+- 退出会删除服务端会话，已签发的 access token 立刻失效；但 Redis 故障期间中间件只按签名放行，已退出的 token 最多还能用 15 分钟。
 - 没有压测或生产规模数据，不要杜撰 QPS、性能提升百分比或上线成绩。
 
 ## 5. 当前目录与关键装配
@@ -268,6 +268,8 @@ M3 第三步（2026-11-06）：最新流时间线已完成。`internal/feed/time
 
 M3 第四步（2026-11-10）：限流已完成。`internal/ratelimit` 提供 `Rule`、`RedisLimiter`（MULTI 里 INCR + EXPIRE NX + PTTL 的固定窗口，key 为 `gostream:ratelimit:v1:{规则}:{ip:… 或 user:…}`）、`LocalLimiter`（go-cache 加锁计数）、`FailoverLimiter`（Redis 出错改用单机计数）和 Gin 中间件（`ByIP`、`ByUser`，超限 429 + 向上取整的 Retry-After，规则无效启动即 panic，缺少用户 ID 返回 500，限流器失败时放行）。`main.go` 给登录（每个 IP 每分钟 10 次）、注册（每个 IP 每小时 10 个）和全部写操作（排在 JWT 之后，每个用户每分钟共 60 次）挂上限流，读接口不限；没有 Redis 时只做单机计数。用户这一步让我直接写入参考实现。Windows 单元与一次性 MySQL 集成测试、Linux vet/race、gostream-dev 真实 Redis（第 11 次登录 429，计数器 `…:login:ip:172.18.0.1` 的 TTL 59 秒，验证后已删除恢复额度）和隔离 Compose 真实浏览器验收通过。已知局限：固定窗口交界处可能放过两倍请求；只按 IP 限登录；Redis 不可用时每个请求仍先尝试 Redis，未做熔断。下一步：认证刷新与撤销。
 
+M3 第五步（2026-11-11）：认证刷新与撤销已完成，M3 完成。`internal/auth/jwt.go` 的 access token 改为 15 分钟、`Claims` 带 `sid`；`internal/auth/session.go` 定义 `SessionStore`（Create/Rotate/Exists/Delete），`RedisSessionStore` 用哈希 `gostream:auth:v1:session:{sid}`（user、refresh、previous 只存 SHA-256，7 天滑动过期），刷新由 Lua 脚本原子比对和轮换，旧 token 再出现就删整个会话；`MemorySessionStore`（go-cache 加锁）用于没有 Redis 的情况。中间件 `JWTAuth`/`OptionalJWTAuth` 多一个 `SessionChecker` 参数，每个请求 EXISTS，没有 sid 的旧 token 一律 401，查询出错时只按签名放行。`UserHandler` 新增 `Refresh`、`Logout` 和 Cookie `gostream_refresh`（HttpOnly、SameSite=Strict、Path=/auth，`Secure` 由 `GOSTREAM_SECURE_COOKIE` 决定）；`main.go` 装配会话存储、`/auth/refresh`（每个 IP 每分钟 30 次）和 `/auth/logout`。前端 `stores/session.ts` 负责恢复、定时刷新、401 重试一次和单飞刷新，路由守卫等待 `restore()`。四个业务文件由用户按参考实现编写。Windows 单元与一次性 MySQL 集成测试、Linux vet/race、前端单元与 UI 测试、gostream-dev 真实 Redis（只发不带账号和密码的请求，验证后删除刷新计数器）和隔离 Compose 真实浏览器验收通过。已知局限：两个标签页同一瞬间刷新会被当成重复使用；部署后旧 token 没有 sid，所有人要重新登录一次。下一步：M4 Outbox、RabbitMQ、Worker 与通知。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -303,7 +305,7 @@ M3 第四步（2026-11-10）：限流已完成。`internal/ratelimit` 提供 `Ru
 | --- | --- |
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
-| M3 | 进行中：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线、限流已完成；余下认证刷新/撤销策略 |
+| M3 | 已完成：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线、限流、认证刷新与撤销 |
 | M4 | 同步业务事实 + 同事务 Outbox、RabbitMQ、独立 Worker、幂等/ACK/重试、通知与鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |

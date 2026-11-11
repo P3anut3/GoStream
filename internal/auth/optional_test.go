@@ -8,7 +8,7 @@ import (
 
 func TestOptionalJWTAuth(t *testing.T) {
 	secret := []byte("test-only-optional-secret-at-least-32-bytes")
-	token, err := GenerateToken(7, secret)
+	token, err := GenerateToken(7, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestOptionalJWTAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			called := false
 			r := gin.New()
-			r.GET("/feed", OptionalJWTAuth(secret), func(c *gin.Context) {
+			r.GET("/feed", OptionalJWTAuth(secret, nil), func(c *gin.Context) {
 				called = true
 				v, exists := c.Get("userID")
 				if tc.id == 0 && exists {

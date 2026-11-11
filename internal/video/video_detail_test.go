@@ -72,7 +72,7 @@ func TestVideoDetailHandler(t *testing.T) {
 
 func TestVideoDeleteHandler(t *testing.T) {
 	secret := []byte("video-test-only-jwt-secret-at-least-32-bytes")
-	token, err := auth.GenerateToken(7, secret)
+	token, err := auth.GenerateToken(7, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestVideoDeleteHandler(t *testing.T) {
 			}}
 			router := gin.New()
 			latest := &fakeLatestFeed{}
-			router.DELETE("/videos/:id", auth.JWTAuth(secret), (&Handler{VideoService: NewVideoService(repo, cache), LatestFeed: latest}).Delete)
+			router.DELETE("/videos/:id", auth.JWTAuth(secret, nil), (&Handler{VideoService: NewVideoService(repo, cache), LatestFeed: latest}).Delete)
 			request := httptest.NewRequest(http.MethodDelete, tc.path, nil)
 			if tc.token != "" {
 				request.Header.Set("Authorization", "Bearer "+tc.token)

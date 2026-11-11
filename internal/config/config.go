@@ -31,4 +31,7 @@ type DatabaseConfig struct {
 type AuthConfig struct {
 	JWTSecret        string
 	FeedCursorSecret string
+	// SecureCookie 来自 GOSTREAM_SECURE_COOKIE，只能是 "true"、"false" 或不设置（等于 false）。
+	// 为 true 时 refresh token 的 Cookie 只通过 HTTPS 发送；本地 http 开发保持 false，上线 HTTPS 必须打开。
+	SecureCookie string
 }

@@ -134,7 +134,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 学习重点：关系表、联合唯一键、接口幂等、EXISTS/JOIN、鉴权与目标 ID 的不同来源。
 - 进度（2026-11-03）：M2 完成。follows 表（006 迁移）、关注/取消/状态 API、详情页关注按钮、关注流 GET /feed/following 与视频库关注标签页均已实现；单元、HTTP、真实 MySQL 集成、端到端、Chromium 夹具与隔离 Compose 真实浏览器验收通过。
 
-### M3：Redis 在真实读链路中发挥作用
+### M3：Redis 在真实读链路中发挥作用（完成）
 
 目标：Feed 读性能与重复请求治理具有可验证的缓存方案。
 
@@ -142,13 +142,14 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 再实现最近时间线缓存，保持最新流的组合排序语义；更旧数据明确回源 MySQL。
 - 加短时本地缓存和 singleflight；分别测命中、未命中、并发回源与失效后的行为，不宣称分布式 singleflight。
 - 登录/写接口限流，明确 Redis 故障时的策略；个性化状态不能污染公共缓存。
-- 明确 access/refresh 凭证、服务端撤销及过期规则，按需扩展认证状态；当前没有 Refresh Token，不能把页面清 token 当作撤销。
+- 明确 access/refresh 凭证、服务端撤销及过期规则，按需扩展认证状态。
 - 验收：命中减少数据库访问；Redis 不可用时降级符合约定；删除作品不因旧缓存继续泄漏展示。
 - 缓存一致性说明必须包含 TTL 与失效窗口，而不是“设置 Redis 后就强一致”。
 - 进度（2026-11-04）：第一步完成。GET /videos/:id 使用 Redis Cache-Aside（key gostream:video:v1:{id}，TTL 10 分钟加 0～60 秒抖动），删除先删库再删缓存，Redis 故障降级到 MySQL；单元、miniredis、MySQL 端到端、gostream-dev 真实 Redis 与隔离 Compose 浏览器验收通过。下一步：本地缓存与 singleflight、空值缓存。
 - 进度（2026-11-05）：第二步完成。Redis 前加 go-cache 5 秒本地缓存（多实例最多陈旧 5 秒）；singleflight 合并单进程内同一 ID 的并发回源，共享查询不随第一个调用方取消，并有 3 秒超时；MySQL 确认不存在时写 30 秒标记防穿透，发布事务提交后清除；Redis 客户端建连也不重试。单元、synctest 并发、MySQL 端到端（两个实例共享 Redis）、gostream-dev 真实 Redis 与隔离 Compose 浏览器验收通过。下一步：时间线缓存。
 - 进度（2026-11-06）：第三步完成。最新流先读 Redis 时间线：有序集合按毫秒发布时间存补零到 20 位的视频 ID（同一毫秒按 ID 倒序，与 MySQL 组合排序一致），哈希存公开字段，只保存最新 500 条，底部哨兵区分“到底了”和“更早的回 MySQL”；续读取“同一毫秒且 ID 更小”加“更早”的两段，不用时间减 1；作者名与点赞信息仍每次查 MySQL。发布、删除后整条失效，读时 singleflight 重建（读 501 行），1 分钟过期兜底并发重建写回旧列表的窗口。单元、synctest 并发、与无缓存路径逐页对比的 MySQL 端到端、gostream-dev 真实 Redis（换镜像前后首页逐字节一致）与隔离 Compose 浏览器验收通过。下一步：限流。
 - 进度（2026-11-10）：第四步完成。新增 internal/ratelimit：固定窗口计数在同一个 MULTI 里执行 INCR、EXPIRE … NX、PTTL，窗口从第一次请求开始，被拒绝的请求不延长窗口，也不会留下没有过期时间的计数器；登录每个 IP 每分钟 10 次、注册每个 IP 每小时 10 个、写操作每个用户每分钟共 60 次，超限返回 429 + Retry-After（向上取整）；Redis 故障时 FailoverLimiter 降级为 go-cache 单机计数，未配置 Redis 时只用单机计数；规则无效启动即 panic，写操作缺少用户 ID 返回 500。单元、单机并发计数、两种装配下的路由限额与 Redis 停机测试、gostream-dev 真实 Redis（第 11 次登录返回 429，计数器 TTL 59 秒，验证后已删除）与隔离 Compose 浏览器验收通过。下一步：认证刷新与撤销。
+- 进度（2026-11-11）：第五步完成，M3 完成。access token 改为 15 分钟并带会话 ID（sid）；refresh token（会话ID.密钥）放在 HttpOnly、SameSite=Strict、Path=/auth 的 Cookie 里，Redis 哈希只存密钥的 SHA-256，7 天滑动过期；每次刷新用 Lua 脚本原子轮换，已换掉的旧 token 再出现就删除整个会话；鉴权中间件每个请求用 EXISTS 确认会话还在，退出后已签发的 access token 立刻失效；Redis 故障时中间件按签名放行（最多 15 分钟），登录和刷新返回 503；未配置 Redis 时会话存在本进程内存；刷新接口每个 IP 每分钟 30 次。前端刷新页面时用 Cookie 恢复登录，过期前 1 分钟自动刷新，401 时刷新并重发一次，同一时刻只发一个刷新请求，退出调用服务端接口。两种会话存储共用的单元测试（20 个并发刷新只成功 1 个）、中间件与 Handler 测试、两种装配下的 MySQL 端到端、前端单元与 UI 测试、gostream-dev 真实 Redis（只发不带账号和密码的请求，验证后删除刷新计数器）与隔离 Compose 浏览器验收（刷新页面保持登录、退出后旧 access token 立刻 401）通过。下一步：M4 异步事件、Worker 与通知。
 
 ### M4：异步事件、Worker 与通知
 
@@ -230,7 +231,7 @@ M0-1 实施记录：公共页面已使用 /feed，新增加载更多、刷新重
 
 2026-11-01 已补真实浏览器验收：隔离环境 7 条作品验证 6+1 条追加、末尾停止、刷新、我的视频切换；页面上传发布和双账号互动另有独立记录。详见 07_m0_acceptance.md，不把模拟 DOM 测试当作完整浏览器验证。
 
-M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成；M3 进行中，视频详情的两级缓存与 singleflight 已完成。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。MQ 在环境中启动不算业务接入；Redis 目前只接入了视频详情缓存。
+M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成；M3（缓存、限流、登录凭证的刷新与撤销）已完成。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。MQ 在环境中启动不算业务接入；Redis 已接入视频详情与最新流缓存、限流计数和登录会话。
 
 ## 10. 本轮依据与边界
 

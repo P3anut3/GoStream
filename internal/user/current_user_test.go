@@ -105,7 +105,7 @@ func TestUserServiceGetCurrentUser(t *testing.T) {
 
 func TestCurrentUserHandler(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(77, secret)
+	token, err := auth.GenerateToken(77, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestCurrentUserHandler(t *testing.T) {
 				handler.Service = NewUserService(repo)
 			}
 			router := gin.New()
-			router.GET("/me", auth.JWTAuth(secret), handler.Me)
+			router.GET("/me", auth.JWTAuth(secret, nil), handler.Me)
 			req := httptest.NewRequest(http.MethodGet, "/me?userID=999", nil).WithContext(ctx)
 			if tc.token != "" {
 				req.Header.Set("Authorization", "Bearer "+tc.token)

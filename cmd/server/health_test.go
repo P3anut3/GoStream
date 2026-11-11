@@ -10,7 +10,7 @@ import (
 
 func TestHealthzWithoutDatabaseOrLogin(t *testing.T) {
 	// A nil database proves liveness does not depend on database availability.
-	router := newRouter(nil, []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
+	router := newRouter(nil, []byte("health-test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil, false)
 	for _, authorization := range []string{"", "Bearer invalid-token"} {
 		name := "anonymous"
 		if authorization != "" {

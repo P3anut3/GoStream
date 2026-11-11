@@ -25,7 +25,7 @@ import (
 
 func TestUpload(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatalf("generate test token: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestUpload(t *testing.T) {
 			db := sql.OpenDB(store)
 			t.Cleanup(func() { db.Close() })
 			handler := &Handler{DB: database.WrapSQL(db), UploadDir: dir}
-			h.POST("/uploads/videos", auth.JWTAuth(secret), handler.Upload)
+			h.POST("/uploads/videos", auth.JWTAuth(secret, nil), handler.Upload)
 			httpx.RegisterMedia(h, "/media/videos", dir)
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)

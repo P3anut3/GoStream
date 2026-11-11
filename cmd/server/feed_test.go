@@ -30,7 +30,7 @@ func newTestFeedCursor(t *testing.T) *feed.CursorCodec {
 }
 
 func TestFeedRouteRejectsInvalidSuppliedToken(t *testing.T) {
-	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
+	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil, false)
 	request := httptest.NewRequest(http.MethodGet, "/feed?userID=1", nil)
 	request.Header.Set("Authorization", "Bearer bad")
 	response := httptest.NewRecorder()
@@ -42,7 +42,7 @@ func TestFeedRouteRejectsInvalidSuppliedToken(t *testing.T) {
 
 func TestFeedRouteRejectsInvalidInputWithoutLogin(t *testing.T) {
 	// Nil database also proves invalid input is rejected before querying storage.
-	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil)
+	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil, false)
 	for _, tc := range []struct{ path, code string }{
 		{"/feed?limit=abc", "INVALID_ARGUMENT"},
 		{"/feed?limit=-1", "INVALID_ARGUMENT"},

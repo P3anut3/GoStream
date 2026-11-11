@@ -23,7 +23,7 @@ import (
 
 func TestUploadCover(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestUploadCover(t *testing.T) {
 			}
 			h := gin.New()
 			handler := &Handler{DB: database.WrapSQL(db), CoverDir: coverDir}
-			h.POST("/uploads/covers", auth.JWTAuth(secret), handler.UploadCover)
+			h.POST("/uploads/covers", auth.JWTAuth(secret, nil), handler.UploadCover)
 			httpx.RegisterMedia(h, "/media/covers", dir)
 			var body bytes.Buffer
 			writer := multipart.NewWriter(&body)

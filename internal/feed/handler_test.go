@@ -135,7 +135,7 @@ func TestHandlerEmptyFeedAndInternalFailure(t *testing.T) {
 
 func TestHandlerFollowing(t *testing.T) {
 	secret := []byte("feed-test-only-jwt-secret-at-least-32-bytes")
-	token, err := auth.GenerateToken(7, secret)
+	token, err := auth.GenerateToken(7, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestHandlerFollowing(t *testing.T) {
 			handler := NewHandler(NewService(repo, codec, nil))
 			router := gin.New()
 			if tc.withJWT {
-				router.GET("/feed/following", auth.JWTAuth(secret), handler.ListFollowing)
+				router.GET("/feed/following", auth.JWTAuth(secret, nil), handler.ListFollowing)
 			} else {
 				router.GET("/feed/following", handler.ListFollowing)
 			}

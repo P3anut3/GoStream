@@ -49,7 +49,7 @@ func TestRouterStaticFilesAndAuthentication(t *testing.T) {
 	}
 	t.Chdir(root)
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	router := newRouter(nil, secret, newTestFeedCursor(t), storage, nil)
+	router := newRouter(nil, secret, newTestFeedCursor(t), storage, nil, false)
 	for _, tc := range []struct {
 		method, path, rangeHeader string
 		want                      int
@@ -146,7 +146,7 @@ func TestGinGORMHTTPIntegration(t *testing.T) {
 	}
 	t.Chdir(root)
 	storage := newTestStorage(t)
-	server := httptest.NewServer(newRouter(database.WrapSQL(db), []byte(config["JWT_SECRET"]), newTestFeedCursor(t), storage, nil))
+	server := httptest.NewServer(newRouter(database.WrapSQL(db), []byte(config["JWT_SECRET"]), newTestFeedCursor(t), storage, nil, false))
 	defer server.Close()
 	client := server.Client()
 	request := func(t *testing.T, method, path, token string, payload any) (int, []byte) {
@@ -198,7 +198,7 @@ func TestGinGORMHTTPIntegration(t *testing.T) {
 	if status, data := request(t, "GET", "/me", login.Token, nil); status != 200 || !strings.Contains(string(data), name) {
 		t.Fatal("authenticated user lookup failed")
 	}
-	if _, err := auth.ParseToken(login.Token, []byte(config["JWT_SECRET"])); err != nil {
+	if _, _, err := auth.ParseToken(login.Token, []byte(config["JWT_SECRET"])); err != nil {
 		t.Fatal("issued token invalid")
 	}
 	otherCredentials := map[string]string{"username": otherName, "password": "integration-test-password"}

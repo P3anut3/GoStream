@@ -25,15 +25,16 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 
 业务目标：用户能安全注册、登录，后续写操作识别真实操作者。
 
-- 现有接口：POST /users、POST /login、GET /me。
-- 持久数据：users；username 唯一，password_hash 保存 bcrypt 结果。
-- 依赖：MySQL、JWT 签名工具；不要求注册依赖 Redis/MQ。
-- 流程：绑定凭据 → Service 校验 → Repository 查询/保存 → 校验密码 → Handler 签发 JWT。
-- 关键失败：重复用户名、错误凭据、token 过期、用户已不存在、数据库故障。
-- 当前限制：页面退出清除本页 token；不等于服务端撤销已签发 token。刷新 token/强制下线不是当前已有功能。
+- 现有接口：POST /users、POST /login、POST /auth/refresh、POST /auth/logout、GET /me。
+- 持久数据：users；username 唯一，password_hash 保存 bcrypt 结果。登录会话在 Redis 哈希 gostream:auth:v1:session:{会话ID} 中，不进 MySQL。
+- 依赖：MySQL、JWT 签名工具；登录会话存 Redis（未配置时存本进程内存）；注册不依赖 Redis/MQ。
+- 流程：绑定凭据 → Service 校验 → Repository 查询/保存 → 校验密码 → 新建会话 → Handler 签发带会话 ID 的 access token（15 分钟），refresh token 写入 HttpOnly Cookie。
+- 关键失败：重复用户名、错误凭据、token 过期、会话已结束、refresh token 被重复使用、用户已不存在、数据库或 Redis 故障。
+- 刷新与撤销（M3 已实现）：refresh token 为“会话ID.密钥”，Redis 哈希只存密钥的 SHA-256，7 天滑动过期；每次刷新用 Lua 脚本原子轮换，已换掉的旧 token 再出现就删除整个会话；中间件每个请求确认会话还在，退出后已签发的 access token 立刻失效；Redis 故障时中间件只按签名放行（最多 15 分钟），登录和刷新返回 503。
+- 当前限制：两个标签页同一瞬间刷新会被当成重复使用而注销会话；没有查看或下线其他设备的功能；改版前签发的不带会话 ID 的 token 不再被接受。
 - 登录限流（M3 已实现）：POST /login 按客户端 IP 每分钟 10 次、POST /users 每小时 10 个，由 internal/ratelimit 的 Gin 中间件在 Handler 之前判断，超限返回 429 + Retry-After，不会走到 bcrypt；Redis 故障时降级为单机计数。没有按账号限流（会被用来锁住别人的账号）。
-- 后续：输入边界；若实现撤销则明确 Redis 会话与 JWT 有效期策略。
-- 验收：错误密码不成功，响应不带哈希，非法身份不能写操作；登录限流故障策略可解释。
+- 后续：输入边界；多设备会话列表与单独下线；刷新的短暂宽限期。
+- 验收：错误密码不成功，响应不带哈希，非法身份不能写操作；登录限流故障策略可解释；退出后旧 token 立刻失效，重放旧 refresh token 会注销会话。
 
 ## 3. 上传与媒体访问
 

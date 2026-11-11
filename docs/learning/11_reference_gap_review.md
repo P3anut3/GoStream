@@ -8,7 +8,7 @@
 
 | 模块 | 已实现并有验证的能力 | 现有源码 | 当前边界 |
 | --- | --- | --- | --- |
-| 用户与认证 | 注册、登录、当前用户、bcrypt、JWT 签名/校验、写接口身份来源 | internal/user、internal/auth | 没有 Refresh Token、服务端撤销、资料编辑；页面退出只清除内存 token |
+| 用户与认证 | 注册、登录、当前用户、bcrypt、JWT 签名/校验、写接口身份来源、refresh token 轮换与重复使用检测、服务端退出与撤销 | internal/user、internal/auth | 没有资料编辑和多设备会话管理 |
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
 | 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；最新流已有 Redis 时间线（最新 500 条，发布/删除后整条重建）；没有热榜或推荐模型 |
@@ -47,7 +47,7 @@
 | 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 关注/取关/状态与关注流已实现；粉丝列表/计数待做 |
 | 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果 |
 | 分片、进度查询、合并、恢复上传 | video/chunk_handler.go | 高：完整技术栈对齐的一部分，但在 Redis 基础后做 |
-| Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 限流已在 M3 实现（internal/ratelimit：固定窗口，Redis 故障降级为单机计数）；刷新与撤销仍为中高优先级，明确过期/刷新/撤销语义 |
+| Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 已在 M3 实现：限流（internal/ratelimit：固定窗口，Redis 故障降级为单机计数）；刷新与撤销（internal/auth/session.go：Redis 会话、refresh token 轮换与重复使用检测，退出后 access token 立刻失效） |
 | 点赞榜、热榜、话题流 | feed 的排行/快照/ZSET 和 ListByTag | 可在缓存/事件基础完成后扩展，热度统计与 MQ 结合 |
 | 头像、简介、改名改密、主页统计、已赞列表 | account、video/like | 后续补齐普通业务，不阻塞核心中间件主线 |
 | 私信、评论 @ 提及 | message/handler.go、comment_service.go | 后置，可选功能；用户目标允许功能不全部复刻 |
@@ -80,7 +80,7 @@ GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先
 | --- | --- | --- |
 | M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
 | M2：关注与关注流（完成） | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
-| M3：缓存与认证增强 | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
+| M3：缓存与认证增强（完成） | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
 | M4：可靠事件与通知 | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
 | M5：分片续传 | 用户绑定的上传会话、Redis 状态、分片校验/幂等、合并、spark-md5、过期清理 | 中断后只补缺失分片，跨账号不能接管；合并后仍走 uploads → Publish 原有归属与生命周期规则 |
 | M6：工程证据 | 扩展 CI、pprof、请求日志/指标、故障演练、对比测试与文档 | 测试和构建可重复；报告真实环境/数据量/并发/延迟/查询次数；保留诊断和修复证据 |

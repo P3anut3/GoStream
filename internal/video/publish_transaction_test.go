@@ -20,7 +20,7 @@ import (
 
 func TestPublishTransaction(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestPublishTransaction(t *testing.T) {
 			latest := &fakeLatestFeed{committed: func() bool { return store.committed }}
 			handler := &Handler{DB: database.WrapSQL(db), VideoService: NewVideoService(&fakeVideoRepository{}, cache), LatestFeed: latest}
 			h := gin.New()
-			h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
+			h.POST("/videos", auth.JWTAuth(secret, nil), handler.Publish)
 			coverURL := "/cover.svg"
 			if tc.cover {
 				coverURL = "/media/covers/cover.png"

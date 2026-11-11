@@ -63,7 +63,7 @@ func TestLikeServiceLikeVideo(t *testing.T) {
 
 func TestLikeServiceHTTPResponse(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(12, secret)
+	token, err := auth.GenerateToken(12, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestLikeServiceHTTPResponse(t *testing.T) {
 			})
 			handler := &Handler{LikeService: NewLikeService(repo)}
 			h := gin.New()
-			h.PUT("/videos/:id/like", auth.JWTAuth(secret), handler.Like)
+			h.PUT("/videos/:id/like", auth.JWTAuth(secret, nil), handler.Like)
 			resp := ut.PerformRequest(h, http.MethodPut, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantStatus {
 				t.Fatalf("expected %d, got %d", tc.wantStatus, resp.StatusCode())

@@ -11,13 +11,13 @@ import (
 func TestToken(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
 
-	token, err := GenerateToken(123, secret)
+	token, err := GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatalf("生成 token 失败：%v", err)
 	}
 
 	t.Run("正确密钥验证成功", func(t *testing.T) {
-		userID, err := ParseToken(token, secret)
+		userID, _, err := ParseToken(token, secret)
 		if err != nil {
 			t.Fatalf("验证 token 失败：%v", err)
 		}
@@ -30,7 +30,7 @@ func TestToken(t *testing.T) {
 	t.Run("错误密钥验证失败", func(t *testing.T) {
 		wrongSecret := []byte("another-test-secret-key-at-least-32-bytes")
 
-		if _, err := ParseToken(token, wrongSecret); err == nil {
+		if _, _, err := ParseToken(token, wrongSecret); err == nil {
 			t.Error("使用错误密钥不应该验证成功")
 		}
 	})
@@ -52,7 +52,7 @@ func TestExpiredToken(t *testing.T) {
 	}
 
 	// 签名正确，但已经过期，仍然必须拒绝
-	_, err = ParseToken(tokenString, secret)
+	_, _, err = ParseToken(tokenString, secret)
 	if !errors.Is(err, jwt.ErrTokenExpired) {
 		t.Fatalf("期望过期错误，实际得到：%v", err)
 	}

@@ -80,7 +80,9 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-      # Redis is only a cache: it orders startup, but the API keeps serving from MySQL if it fails later.
+      # Redis holds caches, rate-limit counters and login sessions (kept across restarts by AOF). It
+      # orders startup; if it fails later, reads fall back to MySQL and signed-in requests keep working,
+      # but login and token refresh answer 503 until it is back.
       redis:
         condition: service_healthy
     healthcheck:

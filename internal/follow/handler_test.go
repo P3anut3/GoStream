@@ -163,7 +163,7 @@ func newFollowRouter(repo Repository, withJWT bool) *gin.Engine {
 	router := gin.New()
 	chain := func(final gin.HandlerFunc) []gin.HandlerFunc {
 		if withJWT {
-			return []gin.HandlerFunc{auth.JWTAuth(handlerTestSecret), final}
+			return []gin.HandlerFunc{auth.JWTAuth(handlerTestSecret, nil), final}
 		}
 		return []gin.HandlerFunc{final}
 	}
@@ -185,7 +185,7 @@ func serveFollow(t *testing.T, router http.Handler, method, path string, userID 
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if userID != 0 {
-		token, err := auth.GenerateToken(userID, handlerTestSecret)
+		token, err := auth.GenerateToken(userID, "", handlerTestSecret)
 		if err != nil {
 			t.Fatal(err)
 		}

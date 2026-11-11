@@ -14,7 +14,7 @@ func TestJWTAuthWithoutToken(t *testing.T) {
 
 	handlerCalled := false
 
-	h.GET("/me", JWTAuth(secret),
+	h.GET("/me", JWTAuth(secret, nil),
 		func(c *gin.Context) {
 			handlerCalled = true
 			c.Status(http.StatusOK)
@@ -36,7 +36,7 @@ func TestJWTAuthWithoutToken(t *testing.T) {
 func TestJWTAuthWithValidToken(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
 
-	token, err := GenerateToken(123, secret)
+	token, err := GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatalf("生成 token 失败：%v", err)
 	}
@@ -44,7 +44,7 @@ func TestJWTAuthWithValidToken(t *testing.T) {
 	h := gin.New()
 	handlerCalled := false
 
-	h.GET("/me", JWTAuth(secret),
+	h.GET("/me", JWTAuth(secret, nil),
 		func(c *gin.Context) {
 			handlerCalled = true
 

@@ -3,14 +3,17 @@ import { test, expect, type Page, type Route } from '@playwright/test'
 const video = (id: number, author = 1) => ({ id, author_id: author, title: `测试作品 ${id}`, play_url: '/media/videos/a.mp4', cover_url: '/cover.svg', created_at: '2026-10-17T12:00:00+08:00', author_name: '测试作者', like_count: 0, liked: false })
 const ok = (route: Route, body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 async function mockAPI(page: Page, override?: (route: Route, path: string, method: string) => Promise<boolean>) {
-  let liked = false, following = false, comments: any[] = []
+  // signedIn stands in for the server session behind the HttpOnly refresh cookie.
+  let liked = false, following = false, comments: any[] = [], signedIn = false
   await page.route('**/*', async route => {
     const url = new URL(route.request().url()), path = url.pathname, method = route.request().method()
     if (override && await override(route, path, method)) return
     if (path === '/feed') return ok(route, { videos: [video(1)], next_cursor: '', has_more: false })
     if (path === '/feed/following') return ok(route, { videos: [], next_cursor: '', has_more: false })
     if (path === '/users' && method === 'POST') return ok(route, { id: 1, username: 'alice' }, 201)
-    if (path === '/login') return ok(route, { id: 1, username: 'alice', token: 'test-issued-token' })
+    if (path === '/login') { signedIn = true; return ok(route, { id: 1, username: 'alice', token: 'test-issued-token' }) }
+    if (path === '/auth/refresh') return signedIn ? ok(route, { id: 1, username: 'alice', token: 'test-issued-token' }) : ok(route, { error: '登录已过期，请重新登录' }, 401)
+    if (path === '/auth/logout') { signedIn = false; return route.fulfill({ status: 204 }) }
     if (path === '/me') return ok(route, { id: 1, username: 'alice' })
     if (path === '/me/videos') return ok(route, { videos: [video(1)], page: 1, page_size: 6 })
     if (/^\/videos\/\d+$/.test(path) && method === 'GET') return ok(route, video(Number(path.split('/')[2])))
@@ -61,7 +64,7 @@ test('cursor append failure retains the first batch and retries the same cursor'
   await expect(page.locator('.video-card')).toHaveCount(1)
 })
 
-test('protected routes open login, personal pagination is independent, refresh clears credentials', async ({ page }) => {
+test('protected routes open login, personal pagination is independent, reload restores the session', async ({ page }) => {
   const paths: string[] = []
   await mockAPI(page, async (route, path) => {
     if (path === '/me/videos') {
@@ -78,10 +81,28 @@ test('protected routes open login, personal pagination is independent, refresh c
   await expect(page.getByRole('heading', { name: '我的视频', exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: '上一页', exact: true })).toBeDisabled()
   expect(paths[0]).toContain('page=1&page_size=6'); expect(paths[0]).not.toContain('cursor')
+  // Reloading restores the login through the refresh cookie, so the protected page stays open.
+  await page.reload()
+  await expect(page.locator('#account-name')).toHaveText('alice')
+  await expect(page).toHaveURL(/#\/mine$/)
+  await expect(page.getByRole('dialog')).toBeHidden()
+  // The access token still lives only in memory.
+  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 })
+})
+
+test('logging out ends the server session, so a reload stays signed out', async ({ page }) => {
+  let logouts = 0
+  await mockAPI(page, async (route, path) => {
+    if (path === '/auth/logout') logouts++
+    return false
+  })
+  await page.goto('/'); await login(page)
+  await page.getByRole('button', { name: '退出', exact: true }).click()
+  await expect(page.locator('#account-name')).toHaveText('访客模式')
+  await expect(page.locator('.toast')).toHaveText('已退出登录')
+  expect(logouts).toBe(1)
   await page.reload()
   await expect(page.locator('#account-name')).toHaveText('访客模式')
-  await expect(page.getByRole('dialog')).toBeVisible()
-  expect(await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length }))).toEqual({ local: 0, session: 0 })
 })
 
 test('publish retries reuse uploaded video and cover; payload contains no author ID', async ({ page }) => {

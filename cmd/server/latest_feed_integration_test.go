@@ -90,9 +90,9 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	defer redisClient.Close()
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
 	storage := newTestStorage(t)
-	cached := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient))
+	cached := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false))
 	defer cached.Close()
-	direct := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, nil)) // MySQL only
+	direct := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, nil, false)) // MySQL only
 	defer direct.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	send := func(server *httptest.Server, method, path, token, contentType string, body io.Reader) (int, []byte) {
@@ -118,9 +118,12 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 		}
 		return response.StatusCode, data
 	}
+	// Each router keeps its own login sessions (cached in Redis, direct in memory), so every
+	// account logs in on both and sends each router the token that router issued.
 	type account struct {
-		ID    uint64 `json:"id"`
-		Token string `json:"token"`
+		ID     uint64
+		Cached string
+		Direct string
 	}
 	signUp := func(username string) account {
 		t.Helper()
@@ -128,12 +131,21 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 		if status, data := send(direct, http.MethodPost, "/users", "", "application/json", bytes.NewReader(credentials)); status != http.StatusCreated {
 			t.Fatalf("register %s: %d %s", username, status, data)
 		}
-		status, data := send(direct, http.MethodPost, "/login", "", "application/json", bytes.NewReader(credentials))
-		var login account
-		if status != http.StatusOK || json.Unmarshal(data, &login) != nil || login.Token == "" {
-			t.Fatalf("login %s: %d %s", username, status, data)
+		login := func(server *httptest.Server) (uint64, string) {
+			t.Helper()
+			status, data := send(server, http.MethodPost, "/login", "", "application/json", bytes.NewReader(credentials))
+			var body struct {
+				ID    uint64 `json:"id"`
+				Token string `json:"token"`
+			}
+			if status != http.StatusOK || json.Unmarshal(data, &body) != nil || body.Token == "" {
+				t.Fatalf("login %s: %d %s", username, status, data)
+			}
+			return body.ID, body.Token
 		}
-		return login
+		id, cachedToken := login(cached)
+		_, directToken := login(direct)
+		return account{ID: id, Cached: cachedToken, Direct: directToken}
 	}
 	author, viewer := signUp("timeline_author"), signUp("timeline_viewer")
 	// Several videos share a second, and 9, 10 and 11 share one: "9" > "10" as text, so only
@@ -210,11 +222,11 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	}
 
 	// 1. The first read builds the timeline with one query; every later page comes from Redis.
-	cachedPages, used := walk(cached, viewer.Token)
+	cachedPages, used := walk(cached, viewer.Cached)
 	if used != 1 {
 		t.Fatalf("a full walk through the timeline must query the videos table once (the rebuild), got %d", used)
 	}
-	directPages, used := walk(direct, viewer.Token)
+	directPages, used := walk(direct, viewer.Direct)
 	if used != int64(len(directPages)) {
 		t.Fatalf("without Redis every page queries MySQL: %d queries for %d pages", used, len(directPages))
 	}
@@ -250,7 +262,7 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	status, data := send(cached, http.MethodPost, "/uploads/videos", author.Token, writer.FormDataContentType(), &form)
+	status, data := send(cached, http.MethodPost, "/uploads/videos", author.Cached, writer.FormDataContentType(), &form)
 	var upload struct {
 		PlayURL string `json:"play_url"`
 	}
@@ -258,7 +270,7 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 		t.Fatalf("upload: %d %s", status, data)
 	}
 	payload, _ := json.Marshal(map[string]string{"title": "fresh on top", "play_url": upload.PlayURL, "cover_url": "/cover.svg"})
-	status, data = send(cached, http.MethodPost, "/videos", author.Token, "application/json", bytes.NewReader(payload))
+	status, data = send(cached, http.MethodPost, "/videos", author.Cached, "application/json", bytes.NewReader(payload))
 	var published struct {
 		ID uint64 `json:"id"`
 	}
@@ -284,7 +296,7 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	firstPage("after publish", published.ID)
 
 	// 4. Deleting invalidates it again, so the deleted video is gone from the next read.
-	if status, data := send(cached, http.MethodDelete, fmt.Sprintf("/videos/%d", published.ID), author.Token, "", nil); status != http.StatusNoContent {
+	if status, data := send(cached, http.MethodDelete, fmt.Sprintf("/videos/%d", published.ID), author.Cached, "", nil); status != http.StatusNoContent {
 		t.Fatalf("delete: %d %s", status, data)
 	}
 	if redisServer.Exists(timelineKey) {
@@ -292,9 +304,10 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	}
 	firstPage("after delete", 6)
 
-	// 5. While Redis is down every page falls back to MySQL and still matches.
+	// 5. While Redis is down every page falls back to MySQL and still matches. The session check
+	// cannot reach Redis either and only verifies the signature, so the viewer stays signed in.
 	redisServer.Close()
-	outagePages, used := walk(cached, viewer.Token)
+	outagePages, used := walk(cached, viewer.Cached)
 	if used != int64(len(outagePages)) {
 		t.Fatalf("during the outage every page must fall back to MySQL: %d queries for %d pages", used, len(outagePages))
 	}

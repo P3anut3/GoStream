@@ -99,7 +99,7 @@ func TestFollowingFeedHTTPMySQLIntegration(t *testing.T) {
 	}
 
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
-	server := httptest.NewServer(newRouter(database.WrapSQL(pool), secret, newTestFeedCursor(t), newTestStorage(t), nil))
+	server := httptest.NewServer(newRouter(database.WrapSQL(pool), secret, newTestFeedCursor(t), newTestStorage(t), nil, false))
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	do := func(method, path, token string, payload any) (int, []byte) {

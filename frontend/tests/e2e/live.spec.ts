@@ -28,6 +28,10 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
   const name = `vue_${Date.now().toString(36)}`
   await page.goto('/')
   const alice = await register(page, `${name}_a`)
+  // Reloading keeps the login through the HttpOnly refresh cookie, which page scripts cannot read.
+  await page.reload()
+  await expect(page.locator('#account-name')).toHaveText(`${name}_a`)
+  expect(await page.evaluate(() => document.cookie)).not.toContain('gostream_refresh')
   await page.locator('.intro a[href="#/publish"]').click()
   await page.locator('#video-file').setInputFiles(fixture)
   await page.locator('#cover-file').setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: png })
@@ -140,5 +144,11 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
   await expect(page).toHaveURL(/#\/mine$/)
   expect((await page.request.get(`/videos/${published.id}`)).status()).toBe(404)
   expect((await page.request.get(media!)).status()).toBe(200)
+  // Logging out ends the server session: the first access token stops working at once, and a reload stays signed out.
+  await page.getByRole('button', { name: '退出', exact: true }).click()
+  await expect(page.locator('#account-name')).toHaveText('访客模式')
+  expect((await page.request.get('/me', { headers: { Authorization: `Bearer ${alice.token}` } })).status()).toBe(401)
+  await page.reload()
+  await expect(page.locator('#account-name')).toHaveText('访客模式')
   expect(errors).toEqual([])
 })

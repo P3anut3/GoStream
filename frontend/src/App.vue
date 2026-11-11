@@ -4,9 +4,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from './stores/session'
 import AuthDialog from './components/AuthDialog.vue'
 const session = useSessionStore(), route = useRoute(), router = useRouter()
-function logout() {
+async function logout() {
   if (session.publishing) { session.notify('请等待当前发布完成'); return }
-  session.clear(); session.notify('已退出当前页面的登录状态')
+  await session.logout(); session.notify('已退出登录')
 }
 watch(() => session.token, token => { if (!token && route.meta.auth) void router.replace('/') })
 </script>

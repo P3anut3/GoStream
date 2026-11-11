@@ -30,13 +30,13 @@ func TestPublishDatabaseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
 	h := gin.New()
 	handler := &Handler{DB: database.WrapSQL(db), UploadDir: dir}
-	h.POST("/videos", auth.JWTAuth(secret), handler.Publish)
+	h.POST("/videos", auth.JWTAuth(secret, nil), handler.Publish)
 	data, err := json.Marshal(map[string]string{
 		"title": "test", "play_url": "/media/videos/" + name, "cover_url": "/cover.svg",
 	})

@@ -9,8 +9,8 @@
 - Gin HTTP 服务，单进程运行。
 - GORM + MySQL 数据访问，用户名唯一约束。
 - bcrypt 密码哈希与校验，不存储明文密码。
-- HS256 JWT，包含用户 ID、签发时间和两小时有效期。
-- Bearer token 鉴权中间件。
+- HS256 JWT（access token），包含用户 ID、登录会话 ID、签发时间和 15 分钟有效期；refresh token 放在 HttpOnly Cookie 中，用于续期和退出登录。
+- Bearer token 鉴权中间件：验证签名和过期时间后，还确认所属会话仍然存在，退出登录后已签发的 token 立刻失效。
 - 公开健康检查：`GET /healthz` 不查数据库；`GET /readyz` 对数据库连接池执行最长 1 秒的 PingContext。成功返回 200、`{"status":"ok"}`；就绪失败返回 503、`{"status":"not_ready"}`，不返回底层错误，详见 [健康检查](docs/learning/09_health_checks.md)。
 - 密码、JWT 和鉴权中间件的基础单元测试。
 - 视频元数据存储、公开查询、分页查询和仅作者可删除的权限控制。
@@ -21,9 +21,10 @@
 - 关注关系 API：关注、取消关注和关注状态查询；关系有向、重复操作幂等、不能关注自己。视频详情页已有作者关注按钮；关注流 `GET /feed/following` 与视频库“关注”标签页只展示已关注作者的作品。
 - 视频详情缓存：`GET /videos/:id` 先查进程内缓存（go-cache，5 秒），再查 Redis（Cache-Aside，可选，未配置 Redis 时直接读 MySQL）；未命中时用 singleflight 合并同一视频的并发回源，不存在的 ID 缓存 30 秒“不存在”标记；删除作品后让缓存失效，发布后清除新 ID 的标记，Redis 故障时降级到 MySQL。
 - 最新流时间线缓存：`GET /feed` 先读 Redis 里最新 500 条视频的时间线（有序集合存顺序，哈希存公开字段），超出这 500 条或 Redis 故障时回源 MySQL；作者名和点赞信息每次查询。发布、删除作品后时间线整条失效，下次读取时重建。
-- 限流：登录（每个 IP 每分钟 10 次）、注册（每个 IP 每小时 10 个）以及发布、上传、评论、点赞、关注、删除等写操作（每个用户每分钟共 60 次）使用固定窗口计数，超过上限返回 429 和 `Retry-After`。计数放在 Redis 里供所有实例共用，Redis 故障或未配置时改用单机计数。
+- 限流：登录（每个 IP 每分钟 10 次）、注册（每个 IP 每小时 10 个）、刷新登录凭证（每个 IP 每分钟 30 次）以及发布、上传、评论、点赞、关注、删除等写操作（每个用户每分钟共 60 次）使用固定窗口计数，超过上限返回 429 和 `Retry-After`。计数放在 Redis 里供所有实例共用，Redis 故障或未配置时改用单机计数。
+- 登录会话：refresh token 7 天滑动过期，每次刷新都换新的，已换掉的旧 token 再被使用时注销整个会话；会话存在 Redis（只存哈希），未配置 Redis 时存在本进程内存。刷新页面不用重新登录，退出登录在服务端生效。
 
-当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。视频详情已通过 go-redis 接入 Redis 缓存；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
 
 ## Compose 快速启动
 
@@ -110,7 +111,9 @@ JWT_SECRET=REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_BYTES
 GOSTREAM_FEED_CURSOR_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_SECRET_AT_LEAST_32_BYTES
 ```
 
-可选：设置 `GOSTREAM_REDIS_ADDR`（例如 `127.0.0.1:16379`）和 `GOSTREAM_REDIS_PASSWORD` 启用视频详情缓存；不设置时直接读写 MySQL。Compose 中的 API 已配置为 `redis:6379`，密码取自 `.env.compose`。
+可选：设置 `GOSTREAM_REDIS_ADDR`（例如 `127.0.0.1:16379`）和 `GOSTREAM_REDIS_PASSWORD` 启用 Redis：缓存、所有实例共用的限流计数和登录会话。不设置时缓存关闭、直接读写 MySQL，限流计数和登录会话只存在本进程内存（API 重启后需要重新登录）。Compose 中的 API 已配置为 `redis:6379`，密码取自 `.env.compose`。
+
+可选：`GOSTREAM_SECURE_COOKIE` 决定 refresh token 的 Cookie 是否带 `Secure`（只通过 HTTPS 发送），只能是 `true`、`false` 或不设置（等同 `false`），其他值启动时报错。本机通过 http 访问时保持默认；部署到 HTTPS 时必须设为 `true`。
 
 将数据库密码和 JWT 密钥占位符替换成自己的配置。JWT 密钥应使用密码学随机源生成，例如在 PowerShell 中执行以下命令，将输出粘贴到 `JWT_SECRET`：
 
@@ -152,11 +155,11 @@ go run ./cmd/server
 浏览器访问 `http://127.0.0.1:8080/`。本机首次需要 Node.js 24 执行前端构建，Gin 提供 web/dist 中的静态产物；运行时不需要 Node。Compose 使用 Dockerfile 自动构建。前端开发热更新、测试和目录说明见 [frontend/README.md](frontend/README.md)。
 
 - 访客可浏览分页列表、按 ID 查看详情、播放可用的视频。
-- 点击“登录 / 注册”创建账号或登录；注册成功后尝试自动登录。token 仅在当前页面内存中保存，刷新或退出后需要重新登录。“退出”不代表服务端撤销已有 token。
+- 点击“登录 / 注册”创建账号或登录；注册成功后尝试自动登录。access token 只保存在当前页面内存中，refresh token 放在页面脚本读不到的 HttpOnly Cookie 里：刷新页面时用它换一个新的 access token，不用重新登录；access token 快过期时也会自动续期。“退出”会删除服务端会话，之前签发的 token 立刻失效。
 - 点击“发布视频”，选择小于等于 100 MiB 的 MP4，填写标题。页面先上传文件，再发布元数据；发布失败时可在同一登录会话中重试，复用已上传地址。
 - 也可以切换到“使用已上传地址”，填写本人上传接口返回的 `/media/videos/…` 地址。可以选择不超过 5 MiB 的 JPEG/PNG 封面，预览或移除；不选则使用 `/cover.svg`。自动抽帧尚未实现。
 - 详情中仅向当前作者显示删除按钮，删除前二次确认；最终权限仍由后端判断。删除只移除数据库记录，当前不删除文件。上传后取消发布也可能留下文件。
-- 公共视频列表、详情和媒体文件是公开访问的；“我的视频”列表需要登录，未发布文件只要知道地址也可访问。页面不显示或持久化 token。
+- 公共视频列表、详情和媒体文件是公开访问的；“我的视频”列表需要登录，未发布文件只要知道地址也可访问。页面不显示 token，也不把它写入 localStorage 或 sessionStorage。
 
 浏览器与 API 使用同一来源。前端源码在 `frontend/src`，通过 Vite 构建到 `web/dist`，由 `httpx.RegisterWeb` 提供。页面使用 Hash 路由，例如 `/#/mine`、`/#/publish`、`/#/videos/1`；后端 JSON API 仍为 `/me/videos`、`/videos`、`/videos/1`。旧 web 页面保留作学习对照，不再由当前路由或镜像提供。没有部署到云端。
 
@@ -167,7 +170,9 @@ go run ./cmd/server
 | 方法 | 路径 | 身份验证 | 成功结果 |
 | --- | --- | --- | --- |
 | POST | `/users` | 无 | 201，用户 ID 和用户名 |
-| POST | `/login` | 用户名和密码 | 200，用户 ID、用户名和 token |
+| POST | `/login` | 用户名和密码 | 200，用户 ID、用户名和 access token；同时设置 refresh Cookie |
+| POST | `/auth/refresh` | refresh Cookie | 200，用户 ID、用户名和新的 access token；同时换一个新的 refresh Cookie |
+| POST | `/auth/logout` | 可选 refresh Cookie | 204，无响应体；删除服务端会话并清除 Cookie |
 | GET | `/me` | Bearer token | 200，当前用户 ID 和用户名 |
 | POST | `/videos` | Bearer token | 201，视频 ID、作者 ID 和标题 |
 | POST | `/videos/:id/comments` | Bearer token | 201，新评论 ID、视频 ID、评论者 ID 和内容 |
@@ -212,7 +217,7 @@ go run ./cmd/server
 {"id":1,"username":"alice","token":"<server-issued-token>"}
 ```
 
-JSON 格式错误或缺少用户名/密码返回 400。用户不存在或密码校验失败返回 401 和 `{"error":"用户名或密码错误"}`。数据库查询或 token 签发失败返回 500。
+JSON 格式错误或缺少用户名/密码返回 400。用户不存在或密码校验失败返回 401 和 `{"error":"用户名或密码错误"}`。数据库查询或 token 签发失败返回 500。成功时还会设置 refresh token 的 Cookie `gostream_refresh`（见下文“登录会话：刷新与撤销”）；会话存储（Redis）不可用时返回 503 和 `{"error":"登录服务暂时不可用，请稍后再试"}`。
 
 ### 当前用户
 
@@ -226,7 +231,7 @@ Authorization: Bearer <server-issued-token>
 
 Postman 中选择 **Authorization → Bearer Token**，只粘贴 token，不添加双引号或 `Bearer ` 前缀。不要选择需要填写 Secret 的 **JWT Bearer**，那是由 Postman 生成 JWT 的功能。
 
-token 缺失、格式不正确、签名校验失败或过期返回 401；数据库中的当前用户已不存在也返回 401；查询失败或请求内部身份信息异常返回 500。成功只返回 ID 和用户名，不返回密码或哈希。
+token 缺失、格式不正确、签名校验失败或过期返回 401；token 所属的会话已经结束（退出登录、被注销或过期）或 token 不带会话 ID 时也返回 401；数据库中的当前用户已不存在也返回 401；查询失败或请求内部身份信息异常返回 500。成功只返回 ID 和用户名，不返回密码或哈希。
 
 ### 视频元数据
 
@@ -285,13 +290,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系、关注流、视频详情缓存与最新流时间线的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系、关注流、视频详情缓存、最新流时间线与登录会话的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration|TestAuthSessionHTTPIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -305,14 +310,15 @@ try {
 | 文件 | 用途 |
 | --- | --- |
 | `cmd/server/main.go` | 加载配置、装配数据库和 handler、注册路由、启动 Gin |
-| `internal/user/handler.go` | 用户接口参数解析、HTTP 响应与登录凭证签发 |
+| `internal/user/handler.go` | 用户接口参数解析、HTTP 响应、登录凭证签发、刷新与退出（refresh Cookie） |
 | `internal/user/service.go`、`repository.go`、`errors.go` | 用户业务规则、GORM 存储及可识别错误 |
 | `internal/user/model.go` | 用户模型 |
 | `internal/user/password.go` | bcrypt 哈希生成和校验 |
 | `internal/database/mysql.go`、`gorm.go` | 创建 MySQL 连接池、检查连接并初始化 GORM |
 | `internal/httpx/http.go` | 完整请求体限制、multipart 临时文件清理和公开媒体访问 |
-| `internal/auth/jwt.go` | JWT 签发和验证 |
-| `internal/auth/middleware.go` | Bearer token 鉴权中间件 |
+| `internal/auth/jwt.go` | access token（JWT）签发和验证：带会话 ID，15 分钟有效 |
+| `internal/auth/session.go` | 登录会话：Redis 与进程内存两种存储，refresh token 轮换、重复使用检测和删除 |
+| `internal/auth/middleware.go` | Bearer token 鉴权中间件：验证签名后确认会话仍在 |
 | `internal/auth/*_test.go`、`internal/user/*_test.go` | 基础单元测试 |
 | `internal/video/handler.go`、`model.go` | 视频元数据接口和模型 |
 | `internal/video/delete_integration_test.go` | 连接 MySQL 的删除权限集成测试 |
@@ -332,7 +338,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 进行中：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线以及登录、注册和写操作限流已完成，接下来是认证增强（刷新与撤销），随后是 MQ/Worker 通知。当前没有 token 刷新、主动撤销、分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。接下来是 M4：Outbox、RabbitMQ、Worker 与通知。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -458,10 +464,49 @@ MySQL 确认视频不存在时，两层缓存都记一个“不存在”标记�
 | --- | --- | --- |
 | `POST /login` | 客户端 IP | 每分钟 10 次 |
 | `POST /users` | 客户端 IP | 每小时 10 个 |
+| `POST /auth/refresh` | 客户端 IP | 每分钟 30 次 |
 | 发布、删除作品，上传视频和封面，点赞与取消，评论与删除评论，关注与取关 | 登录用户 ID（排在 JWT 中间件之后） | 每分钟共 60 次 |
 
 读接口不限流。中间件在 Handler 之前判断，超过上限返回 `429`、`Retry-After`（向上取整的秒数，剩余不到 1 秒也报 1 秒）和 `{"error":"请求太频繁，请 N 秒后再试"}`，被拒绝的登录不会走到 bcrypt，也不会查数据库；前端直接显示这条错误信息。计数器的 key 为 `gostream:ratelimit:v1:{规则}:{ip:地址 或 user:ID}`，每次请求在同一个 `MULTI` 里执行 `INCR`、`EXPIRE … NX` 和 `PTTL`：窗口从第一次请求开始，被拒绝的请求不会把窗口往后推，也不会留下没有过期时间的计数器；万一出现没有过期时间的旧计数器，`EXPIRE NX` 会补上。固定窗口在两个窗口交界处最多可能放过两倍的请求，对登录防护可以接受；更平滑的滑动窗口或令牌桶留作后续。
 
 Redis 正常时所有实例共用计数；Redis 出错时 `FailoverLimiter` 改用本进程内存里的计数（go-cache，加锁保证并发计数准确），既不全部放行也不全部拒绝，代价是部署 N 个实例时总上限放大为 N 倍；未配置 Redis 时只用单机计数。Redis 不可用期间每个请求仍会先尝试 Redis，客户端建连不重试，连接被拒绝时会立即失败；更完善的做法是加熔断，暂时不做。规则写错（名称为空、上限或窗口不大于 0）在启动时 panic；写操作取不到用户 ID 返回 500，说明路由漏了 JWT 中间件。路由器不信任任何代理（`SetTrustedProxies(nil)`），伪造 `X-Forwarded-For` 不能换一个 IP 绕过限流；在 Docker 端口转发下所有本机请求看起来来自同一个网关 IP，共用一个登录额度。只按 IP 限制登录，挡不住多个 IP 轮流猜同一个账号；按账号限制又可能被用来锁住别人的账号，这一取舍暂未处理。
 
-默认测试覆盖：Redis 计数在窗口内的放行与拒绝、`Retry-After` 为窗口剩余时间、被拒绝的请求不延长窗口、窗口结束后从 1 重新计数、不同规则和身份互不影响、为没有过期时间的计数器补上过期时间；单机计数的同样语义，以及 100 个 goroutine 同时发出 2000 次请求时正好放行 100 次；Redis 故障时降级后仍然限流。中间件测试覆盖 429 的响应头与正文、Handler 不被执行、不足 1 秒向上取整、伪造转发头无效、按用户分别计数、缺少用户 ID 返回 500、限流器失败时放行、无效规则启动即失败。`TestRouterRateLimits` 在有和没有 Redis 两种装配下验证登录第 11 次、注册第 11 次、写操作第 61 次被拒绝，写操作共用额度且不同用户互不影响，读接口刷 100 次不受限；`TestRouterRateLimitsWhileRedisIsDown` 验证 Redis 停机后改用单机计数仍然限流。
+默认测试覆盖：Redis 计数在窗口内的放行与拒绝、`Retry-After` 为窗口剩余时间、被拒绝的请求不延长窗口、窗口结束后从 1 重新计数、不同规则和身份互不影响、为没有过期时间的计数器补上过期时间；单机计数的同样语义，以及 100 个 goroutine 同时发出 2000 次请求时正好放行 100 次；Redis 故障时降级后仍然限流。中间件测试覆盖 429 的响应头与正文、Handler 不被执行、不足 1 秒向上取整、伪造转发头无效、按用户分别计数、缺少用户 ID 返回 500、限流器失败时放行、无效规则启动即失败。`TestRouterRateLimits` 在有和没有 Redis 两种装配下验证登录第 11 次、注册第 11 次、刷新第 31 次、写操作第 61 次被拒绝，写操作共用额度且不同用户互不影响，读接口刷 100 次不受限；`TestRouterRateLimitsWhileRedisIsDown` 验证 Redis 停机后改用单机计数仍然限流。
+
+### 登录会话：刷新与撤销
+
+登录后有两个凭证：
+
+| | access token | refresh token |
+| --- | --- | --- |
+| 形式 | HS256 JWT，`sub` 为用户 ID，`sid` 为会话 ID | `会话ID.密钥`：32 个十六进制字符，加 32 字节随机数的 base64url |
+| 有效期 | 15 分钟 | 7 天，每次刷新重新计时 |
+| 保存位置 | 页面内存（Pinia），不写 localStorage | HttpOnly Cookie `gostream_refresh`，`SameSite=Strict`、`Path=/auth` |
+| 用途 | 每个请求的 `Authorization: Bearer` | 只发给 `POST /auth/refresh` 和 `POST /auth/logout` |
+
+会话保存在 Redis 哈希 `gostream:auth:v1:session:{会话ID}` 中（字段 `user`、`refresh`、`previous`），只存密钥的 SHA-256，不存原文。`POST /auth/refresh` 用一段 Lua 脚本原子地完成“比对、换新、重新计时”：提交的密钥与当前密钥一致时换一个新密钥，并把旧密钥的哈希记到 `previous`；提交的恰好是已经换掉的上一个密钥，说明 refresh token 可能被盗用，删除整个会话，这个会话的所有 token 立刻失效。两个同时到达的刷新只有一个成功。
+
+鉴权中间件验证签名和过期时间后，再用 `EXISTS` 确认会话还在：退出登录（`POST /auth/logout` 删除会话并清除 Cookie）或会话被注销后，已经签发的 access token 立刻返回 401，不用等它过期。可选鉴权的 `GET /feed` 同样检查，带着已失效的 token 返回 401，不会被当成游客。不带会话 ID 的旧 token（改版前签发的两小时 token）无法撤销，一律返回 401，部署后所有人需要重新登录一次。
+
+| 刷新的情况 | 结果 |
+| --- | --- |
+| 成功 | 200 和 `{"id","username","token"}`，同时设置新的 Cookie |
+| 没有 Cookie、格式错误、会话不存在或已过期、密钥不对、重复使用 | 401 和 `{"error":"登录已过期，请重新登录"}`，并清除 Cookie |
+| 用户已被删除 | 401，删除会话并清除 Cookie |
+| 会话存储（Redis）出错 | 503，保留 Cookie，Redis 恢复后可以继续刷新 |
+
+退出总是返回 204 并清除 Cookie；服务端删除会话失败只记日志，会话会在过期后消失。刷新时旧密钥已经在 Lua 脚本里作废，所以新 Cookie 在查询用户之前就写入响应，即使随后查询失败，浏览器也能拿新 Cookie 重试。
+
+Redis 故障时的取舍：鉴权中间件查不了会话，就只按签名和过期时间放行（fail open），已登录的用户不会因为 Redis 故障全部掉线，代价是故障期间已经退出的 access token 最多还能用 15 分钟；登录和刷新要创建或延长长期凭证，返回 503（fail closed）。未配置 Redis 时会话存在本进程内存（go-cache 加锁实现同样的语义），API 重启后所有人需要重新登录，也不能部署多个实例。Compose 中的 Redis 开启了 AOF，API 或 Redis 重启后会话仍然有效。
+
+前端在第一次路由跳转前用 Cookie 换一次 access token，有效就恢复登录；access token 过期前 1 分钟自动刷新；请求收到 401 时先刷新一次再重发，重发仍是 401 才退出登录。同一时刻只发一个刷新请求，因为服务端会把同一个旧 token 用两次当成盗用。退出时先清本地状态再请求服务端，定时刷新随之取消，迟到的刷新结果会被丢弃。
+
+已知限制：两个标签页恰好在同一瞬间刷新时，后到的请求会被当成重复使用，整个会话被注销，需要重新登录；可以用短暂的宽限期解决，暂未处理。每个需要登录的请求多一次 Redis `EXISTS`，没有压测数据。如果给 Redis 设置了 `maxmemory` 和淘汰策略，会话可能被淘汰，用户会被迫重新登录，生产环境应为会话使用不淘汰数据的配置或单独的实例。没有查看或下线其他设备的功能。
+
+默认测试覆盖：
+
+- 会话存储（Redis 与进程内存两种实现跑同一组测试）：创建、轮换、删除；重复使用注销整个会话，之后最新的 token 也失效；格式错误、非十六进制或长度不对的会话 ID、猜错的密钥都被拒绝，且不影响真实会话；20 个并发刷新正好 1 个成功；Redis 里只有哈希，过期时间在刷新时重新计时；Redis 故障时如实返回错误。
+- 中间件：会话存在时放行、已结束时 401、没有会话 ID 时 401（Redis 故障时也是）、Redis 故障时按签名放行，可选鉴权同样检查；access token 15 分钟过期。
+- Handler：登录设置 HttpOnly、SameSite=Strict、Path=/auth、7 天的 Cookie，会话存储故障返回 503；刷新的轮换与重复使用、缺失或无效 Cookie 被清除、存储故障时保留 Cookie、用户已删除、查询用户失败时仍交出新 Cookie；退出删除会话且总是 204；`Secure` 跟随配置。
+- `TestAuthSessionHTTPIntegration`（MySQL，Redis 与进程内存两种装配）：刷新轮换后新旧两个 access token 都可用；重放旧 refresh token 后，会话里所有 token 立刻 401；退出后 `/me` 和 `/feed` 立刻 401；Redis 停机时 `/me` 仍可用，刷新和登录返回 503，Redis 恢复后同一个 Cookie 可以继续刷新。
+- 前端：页面加载只用一次 Cookie 恢复登录，没有 Cookie 时安静地保持游客；401 后刷新并重发一次，并发的 401 共用一个刷新；刷新失败或重发仍 401 时退出；旧请求的 401 不会清掉新登录；过期前 1 分钟刷新；503 时保留登录；退出立刻生效，并取消定时刷新、忽略迟到的刷新结果。UI 测试验证刷新页面后仍是登录状态且不写 localStorage/sessionStorage，退出后刷新页面仍是游客；隔离 Compose 浏览器验收在真实环境中验证刷新页面保持登录、页面脚本读不到这个 Cookie、退出后旧 access token 立刻 401。

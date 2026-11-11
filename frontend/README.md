@@ -34,4 +34,4 @@ try {
 
 `tests/fixtures/playable.mp4` 是脚本 `scripts/create-test-video.mjs` 用浏览器录制的移动色块，供真实上传、MP4 解码、播放和 Range 验收使用，不来自用户媒体。默认 API 响应夹具和真实浏览器测试是两类证据。截图、失败 trace 输出到已忽略的 `test-results/`。
 
-当前 token 和草稿只在页面内存，刷新后需要重新登录。页面不持有 JWTSecret。Hash 路由避免与 /videos 等后端 API 路径冲突。
+access token 和草稿只在页面内存；refresh token 在 HttpOnly Cookie 里，页面脚本读不到。打开或刷新页面时，路由守卫先等 `session.restore()` 用 Cookie 换一个新的 access token，所以刷新页面不用重新登录（草稿仍会丢失）；access token 过期前 1 分钟自动续期，请求收到 401 时先刷新一次再重发。页面不持有 JWTSecret。Hash 路由避免与 /videos 等后端 API 路径冲突。

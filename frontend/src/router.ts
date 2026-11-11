@@ -15,7 +15,9 @@ export const router = createRouter({
   ],
   scrollBehavior: () => ({ top: 0 }),
 })
-router.beforeEach(to => {
+router.beforeEach(async to => {
   const session = useSessionStore()
+  // 打开页面时先用 refresh Cookie 恢复登录，再判断要不要弹登录框。
+  await session.restore()
   if (to.meta.auth && !session.token) { session.requireLogin(to.fullPath); return '/' }
 })

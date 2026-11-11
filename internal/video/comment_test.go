@@ -18,7 +18,7 @@ import (
 
 func TestCreateCommentValidation(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestCreateCommentValidation(t *testing.T) {
 	}
 	h := gin.New()
 	handler := &Handler{DB: database.WrapSQL(db), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)})}
-	h.POST("/videos/:id/comments", auth.JWTAuth(secret), handler.CreateComment)
+	h.POST("/videos/:id/comments", auth.JWTAuth(secret, nil), handler.CreateComment)
 	for _, tc := range []struct {
 		name, id, token, body string
 		want                  int
@@ -193,7 +193,7 @@ func TestListCommentsServiceResponse(t *testing.T) {
 
 func TestDeleteCommentValidation(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestDeleteCommentValidation(t *testing.T) {
 	}
 	h := gin.New()
 	handler := &Handler{DB: database.WrapSQL(db), CommentService: NewCommentService(&SQLCommentRepository{DB: database.WrapSQL(db)})}
-	h.DELETE("/comments/:id", auth.JWTAuth(secret), handler.DeleteComment)
+	h.DELETE("/comments/:id", auth.JWTAuth(secret, nil), handler.DeleteComment)
 	for _, tc := range []struct {
 		name, id, token string
 		want            int
@@ -238,7 +238,7 @@ func TestDeleteCommentValidation(t *testing.T) {
 
 func TestDeleteCommentServiceResponse(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestDeleteCommentServiceResponse(t *testing.T) {
 			})
 			handler := &Handler{CommentService: NewCommentService(repository)}
 			h := gin.New()
-			h.DELETE("/comments/:id", auth.JWTAuth(secret), handler.DeleteComment)
+			h.DELETE("/comments/:id", auth.JWTAuth(secret, nil), handler.DeleteComment)
 			resp := ut.PerformRequest(h, http.MethodDelete, "/comments/456", nil,
 				ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantStatus {

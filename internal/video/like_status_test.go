@@ -26,7 +26,7 @@ func (f likeStatusRepositoryFunc) GetLikeStatus(ctx context.Context, userID, vid
 
 func TestLikeStatusServiceAndHTTP(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(12, secret)
+	token, err := auth.GenerateToken(12, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestLikeStatusServiceAndHTTP(t *testing.T) {
 			}
 			h := gin.New()
 			handler := &Handler{LikeService: service}
-			h.GET("/videos/:id/like", auth.JWTAuth(secret), handler.GetLikeStatus)
+			h.GET("/videos/:id/like", auth.JWTAuth(secret, nil), handler.GetLikeStatus)
 			resp := ut.PerformRequest(h, http.MethodGet, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 			if resp.StatusCode() != tc.wantCode {
 				t.Fatalf("expected %d, got %d", tc.wantCode, resp.StatusCode())

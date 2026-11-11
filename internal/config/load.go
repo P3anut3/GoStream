@@ -29,6 +29,7 @@ func applyEnv(cfg *Config) {
 	cfg.Database.DSN = os.Getenv("GOSTREAM_DSN")
 	cfg.Auth.JWTSecret = os.Getenv("JWT_SECRET")
 	cfg.Auth.FeedCursorSecret = os.Getenv("GOSTREAM_FEED_CURSOR_SECRET")
+	cfg.Auth.SecureCookie = os.Getenv("GOSTREAM_SECURE_COOKIE")
 }
 
 // 读取 YAML → 环境变量覆盖 → 校验最终配置 → 返回 Config

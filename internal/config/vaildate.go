@@ -56,5 +56,10 @@ func (cfg Config) Validate() error {
 		return errors.New("GOSTREAM_FEED_CURSOR_SECRET 至少需要 32 字节且不能全为空白")
 	}
 
+	// 只接受明确的写法：写成 TRUE、1 之类时宁可启动失败，也不能悄悄关掉 HTTPS 保护。
+	if cfg.Auth.SecureCookie != "" && cfg.Auth.SecureCookie != "true" && cfg.Auth.SecureCookie != "false" {
+		return errors.New("GOSTREAM_SECURE_COOKIE 只能是 true 或 false")
+	}
+
 	return nil
 }

@@ -64,7 +64,7 @@ func TestLikeHTTPIntegration(t *testing.T) {
 			t.Fatal(err)
 		}
 		userIDs = append(userIDs, uint64(id))
-		tokens[i], err = auth.GenerateToken(uint64(id), []byte(config["JWT_SECRET"]))
+		tokens[i], err = auth.GenerateToken(uint64(id), "", []byte(config["JWT_SECRET"]))
 		if err != nil {
 			t.Fatal("cannot generate fixture token")
 		}

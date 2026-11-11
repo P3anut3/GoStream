@@ -14,7 +14,7 @@ import (
 
 func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(123, secret)
+	token, err := auth.GenerateToken(123, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,9 +24,9 @@ func TestLikeValidationAndDatabaseFailure(t *testing.T) {
 	}
 	h := gin.New()
 	handler := &Handler{DB: database.WrapSQL(db), LikeService: NewLikeService(&SQLLikeRepository{DB: database.WrapSQL(db)})}
-	h.PUT("/videos/:id/like", auth.JWTAuth(secret), handler.Like)
-	h.GET("/videos/:id/like", auth.JWTAuth(secret), handler.GetLikeStatus)
-	h.DELETE("/videos/:id/like", auth.JWTAuth(secret), handler.UnLike)
+	h.PUT("/videos/:id/like", auth.JWTAuth(secret, nil), handler.Like)
+	h.GET("/videos/:id/like", auth.JWTAuth(secret, nil), handler.GetLikeStatus)
+	h.DELETE("/videos/:id/like", auth.JWTAuth(secret, nil), handler.UnLike)
 	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		t.Run(method, func(t *testing.T) {
 			for _, tc := range []struct {

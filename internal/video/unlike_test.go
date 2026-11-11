@@ -98,7 +98,7 @@ func TestLikeServiceUnLikeVideo(t *testing.T) {
 
 func TestUnLikeServiceHTTPResponse(t *testing.T) {
 	secret := []byte("test-only-secret-key-at-least-32-bytes")
-	token, err := auth.GenerateToken(12, secret)
+	token, err := auth.GenerateToken(12, "", secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestUnLikeServiceHTTPResponse(t *testing.T) {
 			})
 			h := gin.New()
 			handler := &Handler{LikeService: NewLikeService(repo)}
-			h.DELETE("/videos/:id/like", auth.JWTAuth(secret), handler.UnLike)
+			h.DELETE("/videos/:id/like", auth.JWTAuth(secret, nil), handler.UnLike)
 			for i := 0; i < 2; i++ {
 				resp := ut.PerformRequest(h, http.MethodDelete, "/videos/34/like", nil, ut.Header{Key: "Authorization", Value: "Bearer " + token}).Result()
 				if resp.StatusCode() != tc.want {

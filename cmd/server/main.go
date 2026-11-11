@@ -53,7 +53,7 @@ func main() {
 	if redisClient != nil {
 		defer redisClient.Close()
 	}
-	router := newRouter(db, secret, feedCursor, cfg.Storage, redisClient)
+	router := newRouter(db, secret, feedCursor, cfg.Storage, redisClient, cfg.Auth.SecureCookie == "true")
 	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -75,19 +75,20 @@ func main() {
 	}
 }
 
-// openRedis 创建可选的缓存客户端：未配置时返回 nil；连不上只记录日志，请求会直接读 MySQL。
+// openRedis 创建可选的 Redis 客户端（缓存、限流计数和登录会话）：未配置时返回 nil，限流和会话改存本进程内存；
+// 连不上只记录日志，之后各功能分别降级：缓存直接读 MySQL，限流单机计数，登录和刷新返回 503。
 func openRedis(cfg config.RedisConfig) *redis.Client {
 	if cfg.Addr == "" {
-		log.Printf("未配置 Redis，视频缓存已关闭")
+		log.Printf("未配置 Redis：缓存关闭，限流计数和登录会话只存在本进程内存里（API 重启后需要重新登录）")
 		return nil
 	}
 	client := newRedisClient(cfg.Addr, cfg.Password)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Ping(ctx).Err(); err != nil {
-		log.Printf("Redis 暂不可用，视频详情将直接查询数据库: %v", err)
+		log.Printf("Redis 暂不可用：缓存直接读 MySQL，限流改为单机计数，登录和刷新会返回 503: %v", err)
 	} else {
-		log.Printf("已连接 Redis 缓存 %s", cfg.Addr)
+		log.Printf("已连接 Redis %s（缓存、限流计数和登录会话）", cfg.Addr)
 	}
 	return client
 }
@@ -107,17 +108,24 @@ func newRedisClient(addr, password string) *redis.Client {
 	})
 }
 
-func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client) *gin.Engine {
+func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client, secureCookie bool) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies(nil)
 	router.MaxMultipartMemory = 8 * 1024 * 1024
 	router.Use(httpx.BodyLimit(101 * 1024 * 1024))
 
+	// 登录会话：有 Redis 时存进 Redis（所有实例共用，重启不丢）；没有 Redis 时存在本进程内存（重启后要重新登录）。
+	var sessions auth.SessionStore = auth.NewMemorySessionStore()
+	if redisClient != nil {
+		sessions = &auth.RedisSessionStore{Client: redisClient}
+	}
 	userRepository := &user.GORMRepository{DB: db}
 	userService := user.NewUserService(userRepository)
 	users := &user.UserHandler{
-		JWTSecret: secret,
-		Service:   userService,
+		JWTSecret:    secret,
+		Service:      userService,
+		Sessions:     sessions,
+		SecureCookie: secureCookie,
 	}
 	// 没有 Redis 时必须传"无类型的 nil"接口；把 nil 指针装进接口会让 cache != nil 成立。
 	var videoCache video.VideoCache
@@ -141,7 +149,8 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	followRepository := &follow.GORMRepository{DB: db}
 	followService := follow.NewService(followRepository)
 	followHandler := follow.NewHandler(followService)
-	jwt := auth.JWTAuth(secret)
+	// 每个需要登录的请求都要验签名，并确认会话还在：退出登录后，这个会话签发的 access token 立刻失效。
+	jwt := auth.JWTAuth(secret, sessions)
 	// 限流：有 Redis 时所有实例共用计数，Redis 出错就降级为单机计数；没有 Redis 时只做单机计数。
 	var limiter ratelimit.Limiter = ratelimit.NewLocalLimiter()
 	if redisClient != nil {
@@ -151,12 +160,16 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	registerLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "register", Limit: 10, Window: time.Hour}, ratelimit.ByIP)
 	// 写操作共用一个额度，并且要排在 jwt 后面：按 jwt 放进上下文的用户 ID 计数。
 	writeLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "write", Limit: 60, Window: time.Minute}, ratelimit.ByUser)
+	// 正常每个标签页约 15 分钟刷新一次；这个上限只挡住拿 refresh token 来回猜的请求。
+	refreshLimit := ratelimit.Middleware(limiter, ratelimit.Rule{Name: "refresh", Limit: 30, Window: time.Minute}, ratelimit.ByIP)
 	router.GET("/healthz", health.Live)
 	router.GET("/readyz", health.Ready(db))
-	router.GET("/feed", auth.OptionalJWTAuth(secret), feedHandler.ListLatest)
+	router.GET("/feed", auth.OptionalJWTAuth(secret, sessions), feedHandler.ListLatest)
 	router.GET("/feed/following", jwt, feedHandler.ListFollowing)
 	router.POST("/users", registerLimit, users.CreateUser)
 	router.POST("/login", loginLimit, users.Login)
+	router.POST("/auth/refresh", refreshLimit, users.Refresh)
+	router.POST("/auth/logout", users.Logout)
 	router.GET("/me", jwt, users.Me)
 	router.POST("/videos", jwt, writeLimit, videos.Publish)
 	router.GET("/videos", videos.List)
