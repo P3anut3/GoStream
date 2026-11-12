@@ -72,3 +72,13 @@ CREATE TABLE IF NOT EXISTS follows ( -- 关注表
     CONSTRAINT fk_follows_followee FOREIGN KEY (followee_id) REFERENCES users(id),
     CONSTRAINT chk_follows_not_self CHECK (follower_id <> followee_id)
 );
+
+CREATE TABLE IF NOT EXISTS outbox_events ( -- 发件箱：事件和业务数据同一个事务写入，published_at 为 NULL 表示待发送
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    event_type VARCHAR(64) NOT NULL,
+    payload JSON NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    published_at TIMESTAMP NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    KEY idx_outbox_events_pending (published_at, id)
+);

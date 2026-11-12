@@ -42,13 +42,14 @@ flowchart LR
 | 发布、归属和事务 | internal/video/handler.go 的 Publish | 已实现上传归属检查、锁和状态更新 | 部分逻辑仍在 Handler，按发布功能演进时再提取 |
 | 列表、详情、我的视频、作者删除 | internal/video/handler.go | API 和页面已有 | 删除作品不等于立即回收物理文件 |
 | 最新 Feed | internal/feed、cmd/server/main.go、frontend/src/stores/library.ts | 后端、Vue 页面、自动测试和浏览器验收已完成；索引迁移及 EXPLAIN 已验证 | 后续缓存；关注流已在 M2 完成；没有性能提升数值结论 |
-| 点赞、评论 | internal/video/like*、comment* | 分层、接口、页面、Feed 批量信息和双账号验收已完成 | 异步通知待后续加入 |
+| 点赞、评论 | internal/video/like*、comment* | 分层、接口、页面、Feed 批量信息和双账号验收已完成；新增的点赞、评论与发件箱事件同一事务提交（M4 第一步） | 投递、消费与通知在 M4 后续步骤 |
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
 | 关注关系 | internal/follow、scripts/migrations/006_follows.sql | 关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成与端到端测试；详情页关注按钮与关注流（GET /feed/following、关注标签页）已通过夹具与真实浏览器验收 | 粉丝列表/计数可后续扩展 |
 | 视频详情缓存 | internal/video/video_{repository,cache,local_cache,service}.go、cmd/server/main.go | Redis Cache-Aside、删除后失效、Redis 故障降级；go-cache 5 秒本地缓存、singleflight 合并回源、30 秒“不存在”标记、发布后清标记均已完成，miniredis、MySQL 端到端与真实 Redis 验证通过 | — |
 | 最新流时间线 | internal/feed/timeline.go、service.go、internal/video/handler.go、cmd/server/main.go | Redis 时间线缓存最新 500 条（ZSET 存补零 ID 与毫秒发布时间、HASH 存公开字段、底部哨兵 end/more），发布/删除后整条失效、读时 singleflight 重建，超出窗口或故障回源 MySQL；miniredis、与无缓存路径逐页对比的 MySQL 端到端、真实 Redis 与隔离 Compose 浏览器验收通过 | 发布时增量更新、关注流 |
 | 限流 | internal/ratelimit/limiter.go、middleware.go、cmd/server/main.go | 固定窗口计数（MULTI 里 INCR + EXPIRE NX + PTTL）；登录、注册按 IP，写操作按用户共用额度；超限 429 + Retry-After；Redis 故障降级为单机计数；miniredis、单机并发计数、路由限额与 Redis 停机测试、真实 Redis 与隔离 Compose 浏览器验收通过 | 滑动窗口或令牌桶、按账号限流、熔断 |
+| 事件发件箱 | internal/outbox、scripts/migrations/007_outbox_events.sql | 点赞、评论事件与业务数据同一事务写入 outbox_events，只存 ID | 投递员把事件发到 RabbitMQ（M4 第二步） |
 | RabbitMQ、SSE | compose.yaml 提供 MQ 容器，尚无业务 Client | MQ 环境已验收；业务未实现 | M4 |
 | 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
@@ -160,6 +161,8 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 消费者按事件 ID 幂等地写通知；提交成功再 ACK，失败重试，毒消息隔离。
 - 通知落库后通过受鉴权的 SSE 推送提示；断线后以通知列表补读，SSE 不承担唯一存储职责。
 - 验收：MQ 停机不丢已提交事件，恢复后补发；重复投递不重复通知；非本人不能订阅别人的提醒。
+- 计划（2026-11-12）：拆成五步——发件箱；投递员（cmd/worker，发件箱 → RabbitMQ）；消费者（幂等写通知、ACK、重试、死信）；通知列表接口与页面；SSE 提醒。只通知点赞和评论，自己的视频不通知。
+- 进度（2026-11-12）：第一步完成。新表 outbox_events（007 迁移），id 即事件 ID，published_at 为 NULL 表示待发送；点赞、评论在 GORM 事务里先 INSERT … SELECT、再查作者、最后写 like.created / comment.created 事件（只存 ID），任何一步失败整体回滚；重复点赞、自己的视频、不存在的视频不产生事件。事务假驱动单元测试、真实 MySQL 集成（schema 与迁移一致、并发重复点赞只留一个事件、发件箱不可用时整体回滚）、gostream-dev 执行 007 并换新镜像、隔离 Compose 浏览器验收通过。下一步：投递员。
 
 ### M5：上传增强与恢复能力
 

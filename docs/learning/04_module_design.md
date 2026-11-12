@@ -93,7 +93,7 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 数据：video_comments；同一用户可发多条评论，不对 (user_id,video_id) 加唯一约束。
 - 评论校验去掉首尾空白、1～500 Unicode 字符；只允许删除本人评论。
 - 当前同步 MySQL 写入是成功依据；重复请求、唯一键错误与真实数据库错误要区分。
-- 后续事件：只对真正新增的点赞/评论产生通知事件，重复点赞不应再次创建通知。
+- 事件（M4 第一步已实现）：新增点赞、评论与 like.created / comment.created 事件在同一个事务里写入 outbox_events；重复点赞回滚、不产生事件；给自己的视频点赞或评论不产生事件；取消点赞、删除评论不产生事件，也不撤回已写的事件。
 - 评论重复发送是否防重需要单独产品约定，不能把重复内容一律当成重复请求。
 - 验收：两个用户点赞数一致、个人状态不同；重复点赞不增加记录；删除他人评论失败；不存在视频不能新增互动。
 
@@ -111,12 +111,12 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 页面：详情页作者信息下方的关注按钮；游客先登录，作者本人不显示，状态以后端 GET 结果为准。
 - 验收：关系 API 已由单元、HTTP、真实 MySQL 集成和端到端测试覆盖（有向、幂等、自关注、目标不存在、未登录、非法 ID、跨账号隔离）；关注按钮、关注流与关注标签页已通过 Chromium 夹具与隔离 Compose 真实浏览器验收；MySQL 集成和端到端测试验证多账号筛选、同一时间边界不越界、取关后不可见和游标不能混用。
 
-## 8. 事件、Worker 与通知（拟定）
+## 8. 事件、Worker 与通知（M4 进行中）
 
 业务目标：互动成功后可靠产生作者提醒；服务故障后可以补处理。
 
-- 事件字段：event_id、event_type、version、actor_id、target_id、occurred_at，以及必要业务载荷；不携带密码或 token。
-- 拟定表 outbox_events：事件 ID 唯一、载荷、状态/重试、下次尝试时间和创建时间；具体投递领取方案在 M4 明确。
+- 事件（第一步已实现）：event_type 为 like.created 或 comment.created，同时是发到 RabbitMQ 的 routing key；payload 只含 ID（actor_id、author_id、video_id，评论另有 comment_id），不携带密码、token 或会变的展示内容；event_id 用发件箱自增的 id，时间用 created_at。没有 version 字段：以后改 payload 要兼容已经写入的旧事件。
+- 表 outbox_events（第一步已实现，007 迁移）：id、event_type、payload JSON、created_at、published_at（NULL 为待发送），索引 (published_at, id)；由 internal/outbox 的 Add 在业务事务里写入。投递员的领取和重试方案在第二步确定。
 - 拟定表 notifications：id、recipient_id、event_id、类型、关联作品、已读状态、创建时间；(recipient_id,event_id) 唯一。
 - RabbitMQ：确认发布、持久化配置、失败重试与隔离；消息投递按可能重复处理，不宣称恰好一次。
 - 业务事务提交但发布失败：outbox 保留待发；发布成功但标记失败：允许重发，由消费者去重。
@@ -125,7 +125,7 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 通知只给接收者读取；SSE 通道不能信任客户端传来的 recipient_id。
 - SSE 鉴权在浏览器客户端实现阶段选定：可用带 Authorization 的 fetch 读取流；不把长期 JWT 放在 URL 中。
 - SSE 是提示通道，持久化通知是事实；重连时按位置补读，避免把推送成功当成用户已读。
-- 消息处理不直接依赖用户当前是否在线；去重、自己给自己互动不通知等规则在设计评审中明确。
+- 消息处理不直接依赖用户当前是否在线；自己给自己互动在写事件时就已排除（第一步），消费端按事件 ID 去重。
 
 ## 9. 工程基础与依赖故障策略（目标）
 

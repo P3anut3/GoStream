@@ -23,8 +23,9 @@
 - 最新流时间线缓存：`GET /feed` 先读 Redis 里最新 500 条视频的时间线（有序集合存顺序，哈希存公开字段），超出这 500 条或 Redis 故障时回源 MySQL；作者名和点赞信息每次查询。发布、删除作品后时间线整条失效，下次读取时重建。
 - 限流：登录（每个 IP 每分钟 10 次）、注册（每个 IP 每小时 10 个）、刷新登录凭证（每个 IP 每分钟 30 次）以及发布、上传、评论、点赞、关注、删除等写操作（每个用户每分钟共 60 次）使用固定窗口计数，超过上限返回 429 和 `Retry-After`。计数放在 Redis 里供所有实例共用，Redis 故障或未配置时改用单机计数。
 - 登录会话：refresh token 7 天滑动过期，每次刷新都换新的，已换掉的旧 token 再被使用时注销整个会话；会话存在 Redis（只存哈希），未配置 Redis 时存在本进程内存。刷新页面不用重新登录，退出登录在服务端生效。
+- 事件发件箱（M4 第一步）：点赞和评论成功时，在同一个 MySQL 事务里往 `outbox_events` 写一条待发送事件（`like.created`、`comment.created`，只存 ID）；重复点赞、给自己的视频点赞或评论都不写。事件先存在发件箱里，由 M4 第二步的投递员发到 RabbitMQ。
 
-当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；RabbitMQ 尚未接入；当前仍为单进程模块化应用。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；RabbitMQ 尚未接入（点赞、评论的事件已写进发件箱，等待第二步的投递员发送）；当前仍为单进程模块化应用。
 
 ## Compose 快速启动
 
@@ -290,13 +291,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系、关注流、视频详情缓存、最新流时间线与登录会话的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系、关注流、视频详情缓存、最新流时间线、登录会话与事件发件箱的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./internal/feed ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration|TestAuthSessionHTTPIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./internal/video ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration|TestAuthSessionHTTPIntegration|TestOutboxMySQLIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -328,6 +329,7 @@ try {
 | `internal/video/video_repository.go`、`video_cache.go`、`video_local_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存、进程内缓存以及 Cache-Aside 与 singleflight 规则 |
 | `internal/feed/timeline.go` | 最新流的 Redis 时间线：按发布时间排序的 ID、公开字段、窗口哨兵与整条重建 |
 | `internal/ratelimit/` | 固定窗口限流：Redis 计数、单机计数、Redis 故障时的降级包装和 Gin 中间件 |
+| `internal/outbox/` | 事件发件箱：事件类型和内容（`events.go`），在调用方的事务里写一行待发送事件（`outbox.go`） |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
@@ -338,7 +340,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。接下来是 M4：Outbox、RabbitMQ、Worker 与通知。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱已完成（点赞、评论与事件在同一个事务里提交）；接下来是投递员（`cmd/worker`）把发件箱里的事件发到 RabbitMQ，然后是消费者写通知、通知列表和 SSE 提醒。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -364,7 +366,7 @@ Vue 迁移已完成 Chromium 响应夹具回归和隔离 Compose 中的真实双
 
 ### 点赞
 
-`PUT /videos/:id/like` 无需请求体，用户 ID 从 JWT 上下文获取。首次或重复点赞均返回 204；非法或为零的 ID 返回 400，视频不存在返回 404，无有效 token 返回 401，数据库异常返回 500。`video_likes` 使用 `(user_id, video_id)` 联合主键防止重复，删除视频时通过外键级联清理点赞。新环境使用初始建表脚本；旧环境可执行 `scripts/migrations/002_video_likes.sql`。点赞、取消及查询已接入详情窗口。
+`PUT /videos/:id/like` 无需请求体，用户 ID 从 JWT 上下文获取。首次或重复点赞均返回 204；非法或为零的 ID 返回 400，视频不存在返回 404，无有效 token 返回 401，数据库异常返回 500。`video_likes` 使用 `(user_id, video_id)` 联合主键防止重复，删除视频时通过外键级联清理点赞。新环境使用初始建表脚本；旧环境可执行 `scripts/migrations/002_video_likes.sql`。点赞、取消及查询已接入详情窗口。从 M4 第一步起，第一次给别人的视频点赞时，会在同一个事务里写一条 `like.created` 事件（见“事件发件箱”）。
 
 `DELETE /videos/:id/like` 只删除当前用户对指定视频的点赞，不需要请求体。首次和重复取消均返回 204；格式正确但不存在的视频 ID 同样返回 204；非法、零或负数 ID 返回 400；无有效 token 返回 401；数据库异常返回 500。双账号、双视频的真实 MySQL 测试确认，取消不会影响其他用户或当前用户对其他视频的点赞。
 
@@ -382,7 +384,7 @@ Vue 迁移已完成 Chromium 响应夹具回归和隔离 Compose 中的真实双
 
 ### 发表评论
 
-`POST /videos/:id/comments` 要求 Bearer token 和 JSON 请求体，如 `{"content":"拍得不错！"}`。用户 ID 来自中间件，视频 ID 来自 URL。内容去除首尾空白后必须为 1～500 个 Unicode 字符；非法 ID、JSON 或内容返回 400，未登录返回 401，视频不存在返回 404，数据库异常返回 500。成功返回 201，包含新评论的 `id`、`video_id`、`user_id`、`content`。相同用户可重复评论，每次生成独立 ID；删除视频时评论通过外键级联清理。
+`POST /videos/:id/comments` 要求 Bearer token 和 JSON 请求体，如 `{"content":"拍得不错！"}`。用户 ID 来自中间件，视频 ID 来自 URL。内容去除首尾空白后必须为 1～500 个 Unicode 字符；非法 ID、JSON 或内容返回 400，未登录返回 401，视频不存在返回 404，数据库异常返回 500。成功返回 201，包含新评论的 `id`、`video_id`、`user_id`、`content`。相同用户可重复评论，每次生成独立 ID；删除视频时评论通过外键级联清理。评论别人的视频时，同一个事务里还会写一条 `comment.created` 事件；写事件失败时评论也一起回滚，返回 500 和“保存评论失败”。
 
 初始建表脚本包含评论表；已有环境可执行 `scripts/migrations/003_video_comments.sql`。已有表不会被重复创建。默认测试检查参数、JSON、鉴权及模拟数据库异常；真实 MySQL 联调检查存储内容、独立评论 ID、500/501 中文字符边界、忽略请求体伪造身份及视频删除级联。评论列表及作者删除已实现；前端详情窗口已接入评论分页、发表和作者删除。
 
@@ -510,3 +512,24 @@ Redis 故障时的取舍：鉴权中间件查不了会话，就只按签名和�
 - Handler：登录设置 HttpOnly、SameSite=Strict、Path=/auth、7 天的 Cookie，会话存储故障返回 503；刷新的轮换与重复使用、缺失或无效 Cookie 被清除、存储故障时保留 Cookie、用户已删除、查询用户失败时仍交出新 Cookie；退出删除会话且总是 204；`Secure` 跟随配置。
 - `TestAuthSessionHTTPIntegration`（MySQL，Redis 与进程内存两种装配）：刷新轮换后新旧两个 access token 都可用；重放旧 refresh token 后，会话里所有 token 立刻 401；退出后 `/me` 和 `/feed` 立刻 401；Redis 停机时 `/me` 仍可用，刷新和登录返回 503，Redis 恢复后同一个 Cookie 可以继续刷新。
 - 前端：页面加载只用一次 Cookie 恢复登录，没有 Cookie 时安静地保持游客；401 后刷新并重发一次，并发的 401 共用一个刷新；刷新失败或重发仍 401 时退出；旧请求的 401 不会清掉新登录；过期前 1 分钟刷新；503 时保留登录；退出立刻生效，并取消定时刷新、忽略迟到的刷新结果。UI 测试验证刷新页面后仍是登录状态且不写 localStorage/sessionStorage，退出后刷新页面仍是游客；隔离 Compose 浏览器验收在真实环境中验证刷新页面保持登录、页面脚本读不到这个 Cookie、退出后旧 access token 立刻 401。
+
+### 事件发件箱（M4 第一步）
+
+点赞或评论成功后要通知视频作者，但“写 MySQL”和“发 RabbitMQ”属于两个系统，放不进同一个事务：先写库再发消息，中间崩溃会丢通知；先发消息再写库，事务回滚就通知了一件没发生的事。所以采用事务发件箱：业务数据和一行“待发送事件”在同一个 MySQL 事务里提交，要么都在，要么都不在；处理请求时 API 不连 RabbitMQ，之后由投递员（M4 第二步）把事件发出去。
+
+`outbox_events` 的字段：`id`（事件 ID，消费者靠它去重）、`event_type`、`payload`（JSON）、`created_at`、`published_at`（NULL 表示还没发送），索引 `(published_at, id)` 供投递员按顺序取待发送的事件。已有数据库先执行一次 `scripts/migrations/007_outbox_events.sql`（只新建这张表），再启动新版 API，否则点赞和评论会失败；新数据库由 `schema.sql` 创建。
+
+| 事件类型 | payload |
+| --- | --- |
+| `like.created` | `{"actor_id", "author_id", "video_id"}` |
+| `comment.created` | `{"actor_id", "author_id", "video_id", "comment_id"}` |
+
+事件只存 ID，用户名、标题和评论内容在展示通知时再查。事件类型也是第二步发到 RabbitMQ 时的 routing key，单词之间用点分隔，topic 交换机的 `like.*` 这类绑定才能匹配。
+
+- `SQLLikeRepository.LikeVideo` 和 `SQLCommentRepository.CreateComment` 在 GORM 的 `Transaction` 里先用 `INSERT … SELECT` 插入点赞或评论，再查视频作者，最后用 `outbox.Add(tx, …)` 写事件，事务里每条 SQL 都用 `tx`。插入时的外键检查给这条视频加了共享锁，提交前视频删不掉，所以一定查得到作者。
+- 重复点赞（主键冲突）回滚，不产生新事件，接口仍返回 204；视频不存在返回 404，也不产生事件。
+- 给自己的视频点赞或评论：照常保存，不写事件。取消点赞、删除评论不产生事件，已写的事件不撤回。点赞、取消、再点赞会产生第二个事件。
+- 写事件失败时整个事务回滚，点赞或评论也不保存，接口返回 500。
+- payload 以字符串传入：DSN 开启 `interpolateParams` 时，`[]byte` 会被拼成二进制字符串，MySQL 的 JSON 列会拒绝（错误 3144）。
+
+默认测试用一个支持事务的假驱动检查：点赞和评论在一个事务里依次执行插入、查作者、写事件，每条 SQL 都在事务的连接上；成功时提交，任何一步失败都回滚；开启或提交事务失败时如实返回错误；评论失败时返回 ID 0 和安全的提示文字；事件类型和 JSON 字段名固定不变。`TestOutboxMySQLIntegration`（真实 MySQL）检查 `schema.sql` 与 007 迁移建出的表结构完全一致；第一次点赞、评论各留下一条内容正确、`published_at` 为 NULL 的事件；重复点赞、给自己的视频、不存在的视频都不留事件；取消点赞不留事件，再点赞再留一条；8 个并发重复点赞只留一条；发件箱表不可用时点赞和评论都回滚。还没有发送事件的投递员，`published_at` 目前一直是 NULL。

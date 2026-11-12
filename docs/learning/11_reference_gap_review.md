@@ -12,13 +12,13 @@
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
 | 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；最新流已有 Redis 时间线（最新 500 条，发布/删除后整条重建）；没有热榜或推荐模型 |
-| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入；没有通知、已赞列表或 @ 提及 |
+| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入，同一事务写发件箱事件（M4 第一步）；还没有通知、已赞列表或 @ 提及 |
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
-| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis 已用于视频详情缓存，MQ 尚无业务调用；没有吞吐量结论 |
+| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis 已用于缓存、限流计数和登录会话，MQ 尚无业务调用（事件已写进发件箱，投递员待做）；没有吞吐量结论 |
 
-现有数据库有 users、videos、uploads、video_likes、video_comments、follows 六张业务表（follows 由 006 迁移加入）。没有 notifications、outbox_events 等表。
+现有数据库有 users、videos、uploads、video_likes、video_comments、follows、outbox_events 七张表（follows 由 006、outbox_events 由 007 迁移加入）。还没有 notifications 表。
 
 分层应按实际源码描述：用户、Feed、点赞、评论已有 Handler → Service → Repository；部分视频与上传操作仍在 Handler，不能宣称已经全项目统一。后续接入视频缓存、发布事件时再沿业务边界下沉这些操作，保留已经实现的归属和事务规则。
 
@@ -81,7 +81,7 @@ GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先
 | M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
 | M2：关注与关注流（完成） | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
 | M3：缓存与认证增强（完成） | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
-| M4：可靠事件与通知 | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
+| M4：可靠事件与通知（进行中，发件箱已完成） | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
 | M5：分片续传 | 用户绑定的上传会话、Redis 状态、分片校验/幂等、合并、spark-md5、过期清理 | 中断后只补缺失分片，跨账号不能接管；合并后仍走 uploads → Publish 原有归属与生命周期规则 |
 | M6：工程证据 | 扩展 CI、pprof、请求日志/指标、故障演练、对比测试与文档 | 测试和构建可重复；报告真实环境/数据量/并发/延迟/查询次数；保留诊断和修复证据 |
 

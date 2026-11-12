@@ -42,7 +42,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 3. `docs/learning/13_vue_migration.md`：最新前端、部署和验收记录。
 4. `README.md`、`frontend/README.md`：启动与复现命令。
 5. `cmd/server/main.go`：配置、依赖装配、实际路由和退出信号。
-6. `scripts/schema.sql`、`scripts/migrations/`：六张现有表及 001～006 迁移。
+6. `scripts/schema.sql`、`scripts/migrations/`：七张现有表及 001～007 迁移。
 7. 改 Feed 或关注流前读 `internal/feed/{entity,cursor,service,repository,handler}.go`。
 
 其他记录：07 为 M0 验收，08 配置，09 健康检查，10 Docker，12 Compose。较早文档记录的是当时实现；最新现状以源码和 00/11/13 为准。
@@ -58,6 +58,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息；最新流先读 Redis 时间线 | `internal/feed`；时间线缓存最新 500 条（ZSET 存顺序、HASH 存公开字段），发布/删除后整条失效、读时重建，超出窗口或故障回源 MySQL；关注流直接查 MySQL；无推荐模型 |
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
+| 事件发件箱 | 点赞、评论与 `like.created`/`comment.created` 事件在同一事务写入 `outbox_events`；重复点赞、自己的视频、不存在的视频不写事件 | `internal/outbox`、`007_outbox_events.sql`；还没有投递员，事件只存在 MySQL，`published_at` 一直是 NULL |
 | 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；关注按钮与关注流（GET /feed/following、关注标签页）已完成 |
 | 视频详情缓存 | GET /videos/:id 两级缓存：进程内 go-cache 5 秒 + Redis Cache-Aside；未命中经 singleflight 合并回源；不存在的 ID 写 30 秒标记；删除后失效、发布后清标记；Redis 故障降级 MySQL | `internal/video/video_{repository,cache,local_cache,service}.go`；Redis TTL 10 分钟加抖动；singleflight 只合并单进程内的回源；多实例的本地缓存最多陈旧 5 秒 |
 | 限流 | 登录、注册按客户端 IP，写操作按登录用户，固定窗口计数；超限返回 429 + Retry-After；Redis 故障或未配置时改用单机计数 | `internal/ratelimit`；登录每分钟 10 次、注册每小时 10 个、发布/上传/评论/点赞/关注/删除共用每分钟 60 次；读接口未限流，没有按账号限流 |
@@ -67,12 +68,12 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 容器 | 多阶段前后端构建、非 root、四服务 Compose、命名卷、健康依赖 | `Dockerfile`、`compose.yaml`；环境和持久化已验收 |
 | CI | Go 格式/vet/race/构建，前端测试/类型检查/构建/Chromium 夹具测试 | `.github/workflows/ci.yml`；2026-11-02 GitHub Actions 首次运行（#1，cdf4a69）通过 |
 
-现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`、`follows`。
+现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`、`follows`、`outbox_events`。
 
 重要边界：
 
 - Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；登录会话存在 Redis（故障时已登录的请求按签名放行，登录和刷新返回 503）；关注流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
-- 没有 notifications、outbox 表，没有独立消息 Worker、SSE 或分片上传。
+- 已有 outbox_events（M4 第一步），但没有 notifications 表，没有独立消息 Worker、SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
 - 媒体公开可读；未发布文件知道地址也能访问。前端隐藏按钮不等于后端授权。
@@ -270,6 +271,8 @@ M3 第四步（2026-11-10）：限流已完成。`internal/ratelimit` 提供 `Ru
 
 M3 第五步（2026-11-11）：认证刷新与撤销已完成，M3 完成。`internal/auth/jwt.go` 的 access token 改为 15 分钟、`Claims` 带 `sid`；`internal/auth/session.go` 定义 `SessionStore`（Create/Rotate/Exists/Delete），`RedisSessionStore` 用哈希 `gostream:auth:v1:session:{sid}`（user、refresh、previous 只存 SHA-256，7 天滑动过期），刷新由 Lua 脚本原子比对和轮换，旧 token 再出现就删整个会话；`MemorySessionStore`（go-cache 加锁）用于没有 Redis 的情况。中间件 `JWTAuth`/`OptionalJWTAuth` 多一个 `SessionChecker` 参数，每个请求 EXISTS，没有 sid 的旧 token 一律 401，查询出错时只按签名放行。`UserHandler` 新增 `Refresh`、`Logout` 和 Cookie `gostream_refresh`（HttpOnly、SameSite=Strict、Path=/auth，`Secure` 由 `GOSTREAM_SECURE_COOKIE` 决定）；`main.go` 装配会话存储、`/auth/refresh`（每个 IP 每分钟 30 次）和 `/auth/logout`。前端 `stores/session.ts` 负责恢复、定时刷新、401 重试一次和单飞刷新，路由守卫等待 `restore()`。四个业务文件由用户按参考实现编写。Windows 单元与一次性 MySQL 集成测试、Linux vet/race、前端单元与 UI 测试、gostream-dev 真实 Redis（只发不带账号和密码的请求，验证后删除刷新计数器）和隔离 Compose 真实浏览器验收通过。已知局限：两个标签页同一瞬间刷新会被当成重复使用；部署后旧 token 没有 sid，所有人要重新登录一次。下一步：M4 Outbox、RabbitMQ、Worker 与通知。
 
+M4 第一步（2026-11-12）：事件发件箱已完成。新表 `outbox_events`（`id` 即事件 ID、`event_type`、`payload` JSON、`created_at`、`published_at` 为 NULL 表示待发送，索引 `(published_at, id)`），已有库执行 `007_outbox_events.sql`。`internal/outbox` 定义 `like.created`、`comment.created` 及只含 ID 的载荷（actor_id、author_id、video_id，评论另有 comment_id），`Add(tx, 类型, 内容)` 在调用方事务里写一行（载荷以字符串传入，避免 interpolateParams 下 JSON 列拒收二进制串）。`LikeVideo`、`CreateComment` 改为 GORM `Transaction`：`INSERT … SELECT` → 查作者（外键检查已锁住视频行）→ 不是自己的视频才写事件，任何失败整体回滚；重复点赞回滚且接口仍 204。四个业务文件由用户编写（`like_created` 常量写错被测试当场抓到后改正）。测试新增支持事务的假驱动（能发现不在事务连接上的 SQL）和 `TestOutboxMySQLIntegration`（schema 与 007 表结构一致、并发重复点赞只留一个事件、发件箱不可用时整体回滚）。gostream-dev 已经用户同意执行 007 并换新镜像；Windows 全量与一次性 MySQL、Linux vet/race、隔离 Compose 真实浏览器验收通过。下一步：M4 第二步投递员（cmd/worker：发件箱 → RabbitMQ）。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -306,7 +309,7 @@ M3 第五步（2026-11-11）：认证刷新与撤销已完成，M3 完成。`int
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
 | M3 | 已完成：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线、限流、认证刷新与撤销 |
-| M4 | 同步业务事实 + 同事务 Outbox、RabbitMQ、独立 Worker、幂等/ACK/重试、通知与鉴权 SSE |
+| M4 | 进行中：第一步同事务 Outbox 已完成；余下投递员（RabbitMQ、独立 Worker）、消费者（幂等/ACK/重试/死信）、通知列表、鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |
 

@@ -7,55 +7,111 @@ import (
 	"errors"
 	"fmt"
 	"gostream/internal/database"
-	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
 )
 
+// TestSQLLikeRepositoryLikeVideo checks that a like and its outbox event are written in one
+// transaction: every statement runs on the transaction's connection, success commits, and
+// any failure rolls the like back together with the event.
 func TestSQLLikeRepositoryLikeVideo(t *testing.T) {
 	writeFailure := errors.New("database unavailable")
 	resultFailure := errors.New("affected rows unavailable")
+	lookupFailure := errors.New("author lookup failed")
+	outboxFailure := errors.New("outbox unavailable")
 	otherMySQLError := &mysql.MySQLError{Number: 1452, Message: "foreign key constraint"}
+	likeOnly := []string{likeInsertSQL}
+	likeAndAuthor := []string{likeInsertSQL, authorQuerySQL}
+	everything := []string{likeInsertSQL, authorQuerySQL, outboxInsertSQL}
 	for _, tc := range []struct {
-		name                 string
-		result               driver.Result
-		execError, wantError error
+		name                     string
+		likeResult               driver.Result
+		likeError                error
+		authorID                 int64
+		authorError, outboxError error
+		wantError                error
+		wantStatements           []string
+		wantEvent                string
+		wantCommit               bool
 	}{
-		{name: "first_like", result: driver.RowsAffected(1)},
-		{name: "duplicate_like", execError: &mysql.MySQLError{Number: 1062}, wantError: ErrAlreadyLiked},
-		{name: "wrapped_duplicate_like", execError: fmt.Errorf("driver: %w", &mysql.MySQLError{Number: 1062}), wantError: ErrAlreadyLiked},
-		{name: "video_not_found", result: driver.RowsAffected(0), wantError: ErrLikeVideoNotFound},
-		{name: "write_failure_preserves_cause", execError: writeFailure, wantError: writeFailure},
-		{name: "other_mysql_error_is_not_duplicate", execError: otherMySQLError, wantError: otherMySQLError},
-		{name: "affected_rows_failure_preserves_cause", result: likeRepositoryResult{err: resultFailure}, wantError: resultFailure},
+		{name: "like_writes_an_event_for_the_author", likeResult: driver.RowsAffected(1), authorID: 99, wantStatements: everything,
+			wantEvent: `{"actor_id":12,"author_id":99,"video_id":34}`, wantCommit: true},
+		{name: "own_video_writes_no_event", likeResult: driver.RowsAffected(1), authorID: 12, wantStatements: likeAndAuthor, wantCommit: true},
+		{name: "duplicate_like", likeError: &mysql.MySQLError{Number: 1062}, wantError: ErrAlreadyLiked, wantStatements: likeOnly},
+		{name: "wrapped_duplicate_like", likeError: fmt.Errorf("driver: %w", &mysql.MySQLError{Number: 1062}), wantError: ErrAlreadyLiked, wantStatements: likeOnly},
+		{name: "video_not_found", likeResult: driver.RowsAffected(0), wantError: ErrLikeVideoNotFound, wantStatements: likeOnly},
+		{name: "write_failure_preserves_cause", likeError: writeFailure, wantError: writeFailure, wantStatements: likeOnly},
+		{name: "other_mysql_error_is_not_duplicate", likeError: otherMySQLError, wantError: otherMySQLError, wantStatements: likeOnly},
+		{name: "affected_rows_failure_preserves_cause", likeResult: likeRepositoryResult{err: resultFailure}, wantError: resultFailure, wantStatements: likeOnly},
+		{name: "author_lookup_failure_rolls_back", likeResult: driver.RowsAffected(1), authorError: lookupFailure, wantError: lookupFailure, wantStatements: likeAndAuthor},
+		{name: "outbox_failure_rolls_back_the_like", likeResult: driver.RowsAffected(1), authorID: 99, outboxError: outboxFailure, wantError: outboxFailure,
+			wantStatements: everything, wantEvent: `{"actor_id":12,"author_id":99,"video_id":34}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			calls := 0
-			connector := likeRepositoryConnector{exec: func(gotContext context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-				calls++
-				if gotContext != ctx {
-					t.Error("request context must reach the database")
-				}
-				// The insert must be conditional on the target video existing.
-				if strings.Join(strings.Fields(query), " ") != "INSERT INTO video_likes (user_id, video_id) SELECT ?, id FROM videos WHERE id = ?" {
-					t.Errorf("unexpected like INSERT: %s", query)
-				}
-				if len(args) != 2 || args[0].Value != int64(12) || args[1].Value != int64(34) {
-					t.Error("SQL arguments must be user ID 12 then video ID 34")
-				}
-				return tc.result, tc.execError
-			}}
-			db := sql.OpenDB(connector)
-			t.Cleanup(func() { db.Close() })
-			err := (&SQLLikeRepository{DB: database.WrapSQL(db)}).LikeVideo(ctx, 12, 34)
+			var event string
+			db := &txTestDB{ctx: ctx,
+				exec: func(query string, args []driver.NamedValue) (driver.Result, error) {
+					switch query {
+					case likeInsertSQL:
+						// The insert must be conditional on the target video existing.
+						if len(args) != 2 || args[0].Value != int64(12) || args[1].Value != int64(34) {
+							t.Error("like arguments must be user ID 12 then video ID 34")
+						}
+						return tc.likeResult, tc.likeError
+					case outboxInsertSQL:
+						if len(args) != 2 || args[0].Value != "like.created" {
+							t.Errorf("the event type must be like.created, got %v", args)
+						}
+						event, _ = args[1].Value.(string)
+						return driver.RowsAffected(1), tc.outboxError
+					}
+					return nil, errors.New("unexpected statement")
+				},
+				query: func(query string, args []driver.NamedValue) (driver.Rows, error) {
+					if len(args) != 1 || args[0].Value != int64(34) {
+						t.Error("the author lookup must use video ID 34")
+					}
+					if tc.authorError != nil {
+						return nil, tc.authorError
+					}
+					return authorRows(tc.authorID), nil
+				}}
+			pool := sql.OpenDB(db)
+			t.Cleanup(func() { pool.Close() })
+			err := (&SQLLikeRepository{DB: database.WrapSQL(pool)}).LikeVideo(ctx, 12, 34)
 			if !errors.Is(err, tc.wantError) {
 				t.Fatalf("expected error %v, got %v", tc.wantError, err)
 			}
-			if calls != 1 {
-				t.Errorf("expected one database call, got %d", calls)
+			db.expect(t, tc.wantStatements, tc.wantCommit)
+			if event != tc.wantEvent {
+				t.Errorf("event payload %s, want %s", event, tc.wantEvent)
+			}
+		})
+	}
+}
+
+// TestSQLLikeRepositoryTransactionFailures: failing to begin or commit is reported, never
+// swallowed, because the like would then silently not exist.
+func TestSQLLikeRepositoryTransactionFailures(t *testing.T) {
+	beginFailure, commitFailure := errors.New("cannot begin"), errors.New("cannot commit")
+	for _, tc := range []struct {
+		name string
+		db   *txTestDB
+		want error
+	}{
+		{name: "begin", db: &txTestDB{beginErr: beginFailure}, want: beginFailure},
+		{name: "commit", db: &txTestDB{commitErr: commitFailure}, want: commitFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.db.exec = func(string, []driver.NamedValue) (driver.Result, error) { return driver.RowsAffected(1), nil }
+			tc.db.query = func(string, []driver.NamedValue) (driver.Rows, error) { return authorRows(99), nil }
+			pool := sql.OpenDB(tc.db)
+			t.Cleanup(func() { pool.Close() })
+			if err := (&SQLLikeRepository{DB: database.WrapSQL(pool)}).LikeVideo(context.Background(), 12, 34); !errors.Is(err, tc.want) {
+				t.Fatalf("want %v, got %v", tc.want, err)
 			}
 		})
 	}
