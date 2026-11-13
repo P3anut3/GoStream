@@ -12,11 +12,11 @@
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
 | 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；最新流已有 Redis 时间线（最新 500 条，发布/删除后整条重建）；没有热榜或推荐模型 |
-| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入，同一事务写发件箱事件（M4 第一步）；还没有通知、已赞列表或 @ 提及 |
+| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入，同一事务写发件箱事件（M4 第一步），由 worker 发到 RabbitMQ（第二步）；还没有通知、已赞列表或 @ 提及 |
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
-| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、四服务 Compose、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis 已用于缓存、限流计数和登录会话，MQ 尚无业务调用（事件已写进发件箱，投递员待做）；没有吞吐量结论 |
+| 容器与测试 | 多阶段前后端构建、非 root、数据库停机/恢复、SIGTERM、五服务 Compose（含 worker）、持久化、真实浏览器 | Dockerfile；compose.yaml；cmd/server/*test.go；frontend/tests；.github/workflows/ci.yml | 基础 CI 已在 GitHub 运行通过；Redis 已用于缓存、限流计数和登录会话；worker 已把发件箱事件发到 RabbitMQ，消费者待做；没有吞吐量结论 |
 
 现有数据库有 users、videos、uploads、video_likes、video_comments、follows、outbox_events 七张表（follows 由 006、outbox_events 由 007 迁移加入）。还没有 notifications 表。
 
@@ -30,12 +30,12 @@
 | YAML / dotenv | 配置及环境覆盖 | 已有同类能力；当前 goccy/go-yaml，参考直接使用 gopkg.in/yaml.v3 | 若要求具体解析库也一致，M1 收尾时小范围迁移并保留严格解析测试 |
 | go-redis / Redis | Token 状态、实体缓存、时间线、热榜、限流、分片会话 | 视频详情 Cache-Aside、最新流时间线与限流计数已接入（go-redis v9）；热榜、Token 状态未做 | M3 继续，分片会话在 M5 |
 | go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；最新流时间线的重建也用 singleflight 合并；没有跨实例合并 | 后续缓存按需复用 |
-| amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | Compose 环境和持久消息测试通过；Go AMQP Client 未接入 | M4 |
-| Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 没有消息 Worker 或 Outbox；清理命令不是消息消费者 | M4 |
+| amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | amqp091-go v1.16.0 已接入发布端（internal/mq：发布确认、mandatory、仲裁队列与死信队列）；消费端未做 | M4 第三步接入消费 |
+| Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 事务 Outbox（M4 第一步）和独立 cmd/worker 投递员（第二步：SKIP LOCKED 领取、确认后标记、退避重试、定期清理）已实现；还没有消费者；清理命令不是消息消费者 | M4 第三步 |
 | SSE / 通知 | 通知持久化、列表/未读/已读与实时流 | 未实现 | M4，先有通知数据与鉴权再推送 |
 | Vue 3 / TS / Pinia / Router / Vite | 页面组件、类型约束、状态与路由、前端构建；参考 vite 指向 rolldown-vite 别名 | 已迁移，采用原生 Rolldown 的 Vite 8；构建及浏览器验收通过 | M1 已完成此项；不为复制旧别名降级 |
 | spark-md5 / 分片上传 | 浏览器文件摘要、Redis 会话、上传进度与分片合并 | 未实现 | M5 |
-| Docker Compose | MySQL/Redis/RabbitMQ/API/Worker/前端、网络、卷和健康依赖 | 四服务已验收；Vue 构建产物由 API 镜像提供；Worker 待实现 | M1 环境就绪，独立 Worker 在 M4 |
+| Docker Compose | MySQL/Redis/RabbitMQ/API/Worker/前端、网络、卷和健康依赖 | 五服务已验收（M4 第二步加入 worker，复用 API 镜像）；Vue 构建产物由 API 镜像提供 | M1 环境就绪，worker 在 M4 第二步加入 |
 | CI / miniredis / pprof | 自动 Go 检查与前端构建、Redis 测试替身、性能诊断 | 基础 CI 已在 GitHub Actions 运行通过；miniredis 已用于缓存测试；无 pprof | 诊断与性能在 M6 |
 
 核对来源：[后端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/go.mod)、[前端依赖](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/frontend/package.json)、[Feed 实现](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/feed/service.go)、[路由和装配](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/http/router.go)、[Compose](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/docker-compose.yml)、[CI](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/.github/workflows/ci.yml)。
@@ -62,7 +62,7 @@
 
 GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先保留这一点，在同一事务写待投递事件，由 Worker 将事件交给 RabbitMQ，再完成通知/热度等异步工作。这样仍覆盖 RabbitMQ、Worker、Outbox、重试和幂等；如果以后改为异步业务落库，需要另行说明接口成功语义、读写延迟和故障恢复。
 
-这是未来方案，当前还没有事件表、队列或消费者。参考源码：[点赞 Service](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/like_service.go)、[评论 Service](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/comment_service.go)、[发布事务](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/video_service.go)、[Outbox 轮询器](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/worker/outboxworker.go)。
+M4 第一、二步已实现事件表 outbox_events 和投递员（cmd/worker → RabbitMQ），消费者和通知还没有做。参考源码：[点赞 Service](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/like_service.go)、[评论 Service](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/comment_service.go)、[发布事务](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/video/video_service.go)、[Outbox 轮询器](https://github.com/LeoninCS/feedsystem_video_go/blob/7c1c27d179bf22246931d249267a57df8b5cca4b/backend/internal/worker/outboxworker.go)。
 
 ### 架构和推荐能力
 
@@ -81,7 +81,7 @@ GoStream 目前以同步 MySQL 成功作为点赞/评论成功依据。后续先
 | M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
 | M2：关注与关注流（完成） | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
 | M3：缓存与认证增强（完成） | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
-| M4：可靠事件与通知（进行中，发件箱已完成） | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
+| M4：可靠事件与通知（进行中，发件箱和投递员已完成） | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
 | M5：分片续传 | 用户绑定的上传会话、Redis 状态、分片校验/幂等、合并、spark-md5、过期清理 | 中断后只补缺失分片，跨账号不能接管；合并后仍走 uploads → Publish 原有归属与生命周期规则 |
 | M6：工程证据 | 扩展 CI、pprof、请求日志/指标、故障演练、对比测试与文档 | 测试和构建可重复；报告真实环境/数据量/并发/延迟/查询次数；保留诊断和修复证据 |
 

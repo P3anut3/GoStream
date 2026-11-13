@@ -42,15 +42,15 @@ flowchart LR
 | 发布、归属和事务 | internal/video/handler.go 的 Publish | 已实现上传归属检查、锁和状态更新 | 部分逻辑仍在 Handler，按发布功能演进时再提取 |
 | 列表、详情、我的视频、作者删除 | internal/video/handler.go | API 和页面已有 | 删除作品不等于立即回收物理文件 |
 | 最新 Feed | internal/feed、cmd/server/main.go、frontend/src/stores/library.ts | 后端、Vue 页面、自动测试和浏览器验收已完成；索引迁移及 EXPLAIN 已验证 | 后续缓存；关注流已在 M2 完成；没有性能提升数值结论 |
-| 点赞、评论 | internal/video/like*、comment* | 分层、接口、页面、Feed 批量信息和双账号验收已完成；新增的点赞、评论与发件箱事件同一事务提交（M4 第一步） | 投递、消费与通知在 M4 后续步骤 |
+| 点赞、评论 | internal/video/like*、comment* | 分层、接口、页面、Feed 批量信息和双账号验收已完成；新增的点赞、评论与发件箱事件同一事务提交（M4 第一步），由 worker 发到 RabbitMQ（第二步） | 消费与通知在 M4 后续步骤 |
 | 过期上传清理 | cmd/cleanup-uploads、upload_cleanup* | 已有手动命令和测试 | 未自动调度，不重复重写 |
 | 页面 | frontend/src、frontend/tests、web/dist 构建产物 | Vue/TS/Pinia/Router/Vite 迁移完成，Chromium 夹具与真实双账号测试通过 | 未做全面浏览器兼容性验收 |
 | 关注关系 | internal/follow、scripts/migrations/006_follows.sql | 关注/取消/状态 API 已完成，含单元、HTTP、真实 MySQL 集成与端到端测试；详情页关注按钮与关注流（GET /feed/following、关注标签页）已通过夹具与真实浏览器验收 | 粉丝列表/计数可后续扩展 |
 | 视频详情缓存 | internal/video/video_{repository,cache,local_cache,service}.go、cmd/server/main.go | Redis Cache-Aside、删除后失效、Redis 故障降级；go-cache 5 秒本地缓存、singleflight 合并回源、30 秒“不存在”标记、发布后清标记均已完成，miniredis、MySQL 端到端与真实 Redis 验证通过 | — |
 | 最新流时间线 | internal/feed/timeline.go、service.go、internal/video/handler.go、cmd/server/main.go | Redis 时间线缓存最新 500 条（ZSET 存补零 ID 与毫秒发布时间、HASH 存公开字段、底部哨兵 end/more），发布/删除后整条失效、读时 singleflight 重建，超出窗口或故障回源 MySQL；miniredis、与无缓存路径逐页对比的 MySQL 端到端、真实 Redis 与隔离 Compose 浏览器验收通过 | 发布时增量更新、关注流 |
 | 限流 | internal/ratelimit/limiter.go、middleware.go、cmd/server/main.go | 固定窗口计数（MULTI 里 INCR + EXPIRE NX + PTTL）；登录、注册按 IP，写操作按用户共用额度；超限 429 + Retry-After；Redis 故障降级为单机计数；miniredis、单机并发计数、路由限额与 Redis 停机测试、真实 Redis 与隔离 Compose 浏览器验收通过 | 滑动窗口或令牌桶、按账号限流、熔断 |
-| 事件发件箱 | internal/outbox、scripts/migrations/007_outbox_events.sql | 点赞、评论事件与业务数据同一事务写入 outbox_events，只存 ID | 投递员把事件发到 RabbitMQ（M4 第二步） |
-| RabbitMQ、SSE | compose.yaml 提供 MQ 容器，尚无业务 Client | MQ 环境已验收；业务未实现 | M4 |
+| 事件发件箱与投递员 | internal/outbox、internal/mq、cmd/worker、scripts/migrations/007_outbox_events.sql | 点赞、评论事件与业务数据同一事务写入 outbox_events，只存 ID；独立 worker 用 FOR UPDATE SKIP LOCKED 领取，RabbitMQ 确认后才标记，失败退避重试，已发送 7 天后分批删除；真实 MySQL、RabbitMQ 集成与隔离 Compose 验收通过 | 消费者写通知（M4 第三步） |
+| RabbitMQ、SSE | internal/mq、compose.yaml 的 rabbitmq 与 worker 服务 | amqp091-go 发布端已接入（发布确认、mandatory、仲裁队列与死信队列）；消费者与 SSE 未实现 | M4 第三步起 |
 | 配置/部署/观测 | internal/config、internal/health、Dockerfile、compose.yaml、.github/workflows/ci.yml | 配置、健康检查、镜像、SIGTERM、Compose 持久化及 Vue 部署完成；基础 CI 已在 GitHub Actions 运行通过 | pprof 待完成 |
 
 “有源码/有测试”不等于当前浏览器进程正在运行最新版本。实际验收方式及覆盖边界见 [M0 验收记录](07_m0_acceptance.md)；没有进行压测。
@@ -66,9 +66,9 @@ flowchart TD
     S --> DB[(MySQL：业务事实)]
     S --> CACHE[(Redis：缓存、限流、短期状态)]
     API --> MEDIA[本地视频文件与 Range 访问]
-    DB --> OUT[Outbox 发布器：后续]
-    OUT --> MQ[RabbitMQ：后续]
-    MQ --> W[Worker：通知处理等]
+    DB --> OUT[Outbox 投递员 cmd/worker：已实现]
+    OUT --> MQ[RabbitMQ：已接入发布]
+    MQ --> W[Worker 消费者：通知处理等，后续]
     W --> DB
     W --> CACHE
     W --> N[通知事件]
@@ -163,6 +163,7 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 - 验收：MQ 停机不丢已提交事件，恢复后补发；重复投递不重复通知；非本人不能订阅别人的提醒。
 - 计划（2026-11-12）：拆成五步——发件箱；投递员（cmd/worker，发件箱 → RabbitMQ）；消费者（幂等写通知、ACK、重试、死信）；通知列表接口与页面；SSE 提醒。只通知点赞和评论，自己的视频不通知。
 - 进度（2026-11-12）：第一步完成。新表 outbox_events（007 迁移），id 即事件 ID，published_at 为 NULL 表示待发送；点赞、评论在 GORM 事务里先 INSERT … SELECT、再查作者、最后写 like.created / comment.created 事件（只存 ID），任何一步失败整体回滚；重复点赞、自己的视频、不存在的视频不产生事件。事务假驱动单元测试、真实 MySQL 集成（schema 与迁移一致、并发重复点赞只留一个事件、发件箱不可用时整体回滚）、gostream-dev 执行 007 并换新镜像、隔离 Compose 浏览器验收通过。下一步：投递员。
+- 进度（2026-11-13）：第二步完成。新增独立进程 cmd/worker（Compose 的 worker 服务，复用 API 镜像，只需要 DSN 和 AMQP 地址）：投递员在读已提交事务里用 SELECT … FOR UPDATE SKIP LOCKED 按 id 领取最多 100 条待发事件，经 internal/mq 发到 topic 交换机 gostream.events（持久消息，message_id 为事件 ID，routing key 为事件类型），RabbitMQ 确认收到、且没有因无队列接收被退回时才写 published_at；失败等待 1、2、4… 秒（最多 30 秒），成功后恢复每秒一次，满批立即再领；每小时分批删除发出满 7 天的事件。仲裁队列 gostream.notifications 绑定 like.created、comment.created，最多投递 5 次，超过或被拒绝的进死信队列。投递是至少一次：确认后、标记前出错会重发，由消费者按事件 ID 去重。单元（synctest 虚拟时钟检查退避与清理）、真实 MySQL（SKIP LOCKED、只标记确认的事件、可重复读下新事件写入会被挡住而读已提交不会）与 RabbitMQ 集成、连不上 RabbitMQ 时事件留在发件箱且换回正确地址后全部送达的端到端、变异测试、gostream-dev 换新镜像并启动 worker（已有的 4 条事件已发出）、隔离 Compose 浏览器验收（第二个账号点赞后消息进入通知队列，重建后仍在）通过。下一步：消费者。
 
 ### M5：上传增强与恢复能力
 
@@ -189,10 +190,10 @@ Redis/MQ 在 Compose 中能启动，只算环境就绪，不算业务接入完�
 | Gin / GORM / MySQL / JWT / bcrypt | 已使用 | 当前 | API、数据、认证 |
 | YAML / env | API/清理命令已接入加载、覆盖和校验 | M1 | 统一配置与部署覆盖 |
 | Vue 3 / TS / Pinia / Router / Vite | 已迁移并通过真实浏览器验收，Vite 8 原生 Rolldown | M1 | 可维护的展示和验收客户端 |
-| Docker Compose | 四服务编排和持久化重建测试通过 | M1 | 隔离且可复现的环境 |
+| Docker Compose | 五服务编排（M4 第二步加入 worker）和持久化重建测试通过 | M1 | 隔离且可复现的环境 |
 | go-redis / Redis | 视频详情 Cache-Aside、最新流时间线与限流计数已使用（go-redis v9），测试用 miniredis | M3 | 缓存、时间线、限流、后续上传会话 |
 | go-cache / singleflight | 视频详情已使用：go-cache 5 秒本地缓存，x/sync singleflight 合并单进程内的回源 | M3 | 短时本地缓存和进程内回源合并 |
-| amqp091-go / RabbitMQ / Worker | RabbitMQ 容器已准备，Go 业务与 Worker 未实现 | M4 | 可靠异步通知与后续事件处理 |
+| amqp091-go / RabbitMQ / Worker | cmd/worker 投递员用 amqp091-go 发布点赞、评论事件（M4 第二步）；消费者未实现 | M4 | 可靠异步通知与后续事件处理 |
 | SSE | 未实现 | M4 | 通知即时提示与重连补读 |
 | 分片上传 / spark-md5 | 未实现 | M5 | 上传恢复与前端分片能力 |
 | CI / health / pprof | 健康检查已回归；基础 CI 已在 GitHub Actions 运行通过；pprof 待实现 | M1/M6 | 可运行、可回归、可定位 |
@@ -234,7 +235,7 @@ M0-1 实施记录：公共页面已使用 /feed，新增加载更多、刷新重
 
 2026-11-01 已补真实浏览器验收：隔离环境 7 条作品验证 6+1 条追加、末尾停止、刷新、我的视频切换；页面上传发布和双账号互动另有独立记录。详见 07_m0_acceptance.md，不把模拟 DOM 测试当作完整浏览器验证。
 
-M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成；M3（缓存、限流、登录凭证的刷新与撤销）已完成。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。MQ 在环境中启动不算业务接入；Redis 已接入视频详情与最新流缓存、限流计数和登录会话。
+M1 配置、健康检查、默认 SIGTERM、镜像、Compose 持久化和 Vue 技术栈迁移均已验收。Vue 真实双账号测试覆盖发布播放、互动、越权和 6+1 分页；2026-11-02 阶段提交 cdf4a69 已推送到 GitHub，CI 首次运行（GoStream checks #1）的 backend、frontend 均通过，M1 完成。M2 关注关系与关注流已完成；M3（缓存、限流、登录凭证的刷新与撤销）已完成。进度和边界见 [配置管理](08_config_management.md)、[健康检查](09_health_checks.md)、[容器第一步](10_container_basics.md)、[差距盘点](11_reference_gap_review.md)、[Compose 环境](12_compose_environment.md)、[Vue 迁移](13_vue_migration.md)。M4 已完成发件箱和投递员（worker 用 amqp091-go 把点赞、评论事件发到 RabbitMQ），消费者待做；Redis 已接入视频详情与最新流缓存、限流计数和登录会话。
 
 ## 10. 本轮依据与边界
 

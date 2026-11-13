@@ -41,7 +41,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 2. `docs/learning/11_reference_gap_review.md`：参考栈差距与真实边界。
 3. `docs/learning/13_vue_migration.md`：最新前端、部署和验收记录。
 4. `README.md`、`frontend/README.md`：启动与复现命令。
-5. `cmd/server/main.go`：配置、依赖装配、实际路由和退出信号。
+5. `cmd/server/main.go`：配置、依赖装配、实际路由和退出信号；`cmd/worker/main.go`：后台 worker（发件箱投递员）的配置和退出信号。
 6. `scripts/schema.sql`、`scripts/migrations/`：七张现有表及 001～007 迁移。
 7. 改 Feed 或关注流前读 `internal/feed/{entity,cursor,service,repository,handler}.go`。
 
@@ -58,22 +58,23 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 最新 Feed | created_at DESC、id DESC；签名组合游标；limit+1；批量作者/点赞信息；最新流先读 Redis 时间线 | `internal/feed`；时间线缓存最新 500 条（ZSET 存顺序、HASH 存公开字段），发布/删除后整条失效、读时重建，超出窗口或故障回源 MySQL；关注流直接查 MySQL；无推荐模型 |
 | 点赞 | 点赞/取消幂等、当前用户状态与总数 | `internal/video/like*`；Handler → Service → Repository，同步 MySQL 写入 |
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
-| 事件发件箱 | 点赞、评论与 `like.created`/`comment.created` 事件在同一事务写入 `outbox_events`；重复点赞、自己的视频、不存在的视频不写事件 | `internal/outbox`、`007_outbox_events.sql`；还没有投递员，事件只存在 MySQL，`published_at` 一直是 NULL |
+| 事件发件箱 | 点赞、评论与 `like.created`/`comment.created` 事件在同一事务写入 `outbox_events`；重复点赞、自己的视频、不存在的视频不写事件 | `internal/outbox`、`007_outbox_events.sql`；投递员发送成功后才填 `published_at` |
+| 发件箱投递 worker | 独立进程每秒用 `FOR UPDATE SKIP LOCKED`（读已提交）领一批事件，发到 RabbitMQ topic 交换机 `gostream.events`，确认收到且未被退回才标记；失败退避 1→30 秒；每小时删除发出满 7 天的事件 | `cmd/worker`、`internal/outbox/relay.go`、`internal/mq`；Compose worker 服务；消费者（第三步）还没有，消息在 `gostream.notifications` 里排队 |
 | 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；关注按钮与关注流（GET /feed/following、关注标签页）已完成 |
 | 视频详情缓存 | GET /videos/:id 两级缓存：进程内 go-cache 5 秒 + Redis Cache-Aside；未命中经 singleflight 合并回源；不存在的 ID 写 30 秒标记；删除后失效、发布后清标记；Redis 故障降级 MySQL | `internal/video/video_{repository,cache,local_cache,service}.go`；Redis TTL 10 分钟加抖动；singleflight 只合并单进程内的回源；多实例的本地缓存最多陈旧 5 秒 |
 | 限流 | 登录、注册按客户端 IP，写操作按登录用户，固定窗口计数；超限返回 429 + Retry-After；Redis 故障或未配置时改用单机计数 | `internal/ratelimit`；登录每分钟 10 次、注册每小时 10 个、发布/上传/评论/点赞/关注/删除共用每分钟 60 次；读接口未限流，没有按账号限流 |
 | 上传清理 | pending/published/deleting 生命周期；24 小时未发布上传的手工预览/执行清理 | `cmd/cleanup-uploads`、`upload_cleanup*`；行锁协调发布与清理、失败重试，无自动定时调度 |
 | 配置与健康 | YAML+env 覆盖与校验；healthz/readyz；SIGINT/SIGTERM 退出 | `internal/config`、`internal/health`；readyz 对 DB Ping 最长 1 秒 |
 | 前端 | Vue/TS/Pinia/Router/Vite；注册登录、发布播放、Feed、我的作品、点赞评论、作者删除 | `frontend/src`；迁移及真实浏览器验收已完成 |
-| 容器 | 多阶段前后端构建、非 root、四服务 Compose、命名卷、健康依赖 | `Dockerfile`、`compose.yaml`；环境和持久化已验收 |
+| 容器 | 多阶段前后端构建、非 root、五服务 Compose（api、worker、mysql、redis、rabbitmq）、命名卷、健康依赖 | `Dockerfile`、`compose.yaml`；镜像里有 `gostream` 和 `gostream-worker` 两个程序，worker 服务用自己的 entrypoint；环境和持久化已验收 |
 | CI | Go 格式/vet/race/构建，前端测试/类型检查/构建/Chromium 夹具测试 | `.github/workflows/ci.yml`；2026-11-02 GitHub Actions 首次运行（#1，cdf4a69）通过 |
 
 现有表只有：`users`、`videos`、`uploads`、`video_likes`、`video_comments`、`follows`、`outbox_events`。
 
 重要边界：
 
-- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；登录会话存在 Redis（故障时已登录的请求按签名放行，登录和刷新返回 503）；关注流还没有缓存。RabbitMQ 没有 Go Client 或调用，不能说异步业务已接入。
-- 已有 outbox_events（M4 第一步），但没有 notifications 表，没有独立消息 Worker、SSE 或分片上传。
+- Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；登录会话存在 Redis（故障时已登录的请求按签名放行，登录和刷新返回 503）；关注流还没有缓存。RabbitMQ 已通过 amqp091-go 接入发件箱投递（发布确认、mandatory、持久化 quorum 队列和死信队列），但还没有消费者，不能说通知已经实现。
+- 已有 outbox_events 和发件箱投递 worker（M4 第一、二步），但没有 notifications 表和消费者，没有 SSE 或分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
 - 媒体公开可读；未发布文件知道地址也能访问。前端隐藏按钮不等于后端授权。
@@ -86,6 +87,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 GoStream/
 ├── cmd/server/                 # Gin 入口、路由、HTTP/容器验收测试
 ├── cmd/cleanup-uploads/        # 手工清理命令及测试
+├── cmd/worker/                 # 后台 worker：发件箱投递员及端到端测试
 ├── internal/
 │   ├── auth/                   # JWT、必选/可选身份中间件
 │   ├── config/                 # config.yaml、Load、Validate
@@ -93,11 +95,15 @@ GoStream/
 │   ├── user/                   # 用户 Handler/Service/Repository
 │   ├── feed/                   # 最新流、游标、批量元数据
 │   ├── video/                  # 发布、上传、互动、清理
+│   ├── follow/                 # 关注关系
+│   ├── ratelimit/              # 固定窗口限流
+│   ├── outbox/                 # 事件发件箱与投递员
+│   ├── mq/                     # RabbitMQ 拓扑与带确认的发布器
 │   ├── health/                 # Live、Ready
 │   └── httpx/                  # 请求体限制、媒体、Vue 产物路由
 ├── frontend/                   # 当前 Vue 源码、锁文件和测试
 ├── web/dist/                   # Vite 生成产物，Git 忽略
-├── scripts/                    # 初始 schema、001～005 迁移、环境生成
+├── scripts/                    # 初始 schema、001～007 迁移、环境生成
 ├── docs/learning/              # 学习与验收文档
 ├── compose.yaml
 ├── Dockerfile
@@ -211,7 +217,7 @@ go run ./cmd/server
 ```powershell
 go test ./...
 go vet ./...
-go build ./cmd/server ./cmd/cleanup-uploads
+go build ./cmd/server ./cmd/cleanup-uploads ./cmd/worker
 npm --prefix frontend test
 npm --prefix frontend run build
 Push-Location frontend
@@ -273,6 +279,8 @@ M3 第五步（2026-11-11）：认证刷新与撤销已完成，M3 完成。`int
 
 M4 第一步（2026-11-12）：事件发件箱已完成。新表 `outbox_events`（`id` 即事件 ID、`event_type`、`payload` JSON、`created_at`、`published_at` 为 NULL 表示待发送，索引 `(published_at, id)`），已有库执行 `007_outbox_events.sql`。`internal/outbox` 定义 `like.created`、`comment.created` 及只含 ID 的载荷（actor_id、author_id、video_id，评论另有 comment_id），`Add(tx, 类型, 内容)` 在调用方事务里写一行（载荷以字符串传入，避免 interpolateParams 下 JSON 列拒收二进制串）。`LikeVideo`、`CreateComment` 改为 GORM `Transaction`：`INSERT … SELECT` → 查作者（外键检查已锁住视频行）→ 不是自己的视频才写事件，任何失败整体回滚；重复点赞回滚且接口仍 204。四个业务文件由用户编写（`like_created` 常量写错被测试当场抓到后改正）。测试新增支持事务的假驱动（能发现不在事务连接上的 SQL）和 `TestOutboxMySQLIntegration`（schema 与 007 表结构一致、并发重复点赞只留一个事件、发件箱不可用时整体回滚）。gostream-dev 已经用户同意执行 007 并换新镜像；Windows 全量与一次性 MySQL、Linux vet/race、隔离 Compose 真实浏览器验收通过。下一步：M4 第二步投递员（cmd/worker：发件箱 → RabbitMQ）。
 
+M4 第二步（2026-11-13）：发件箱投递员已完成。`internal/outbox/relay.go` 的 `Relay`（用户编写）：`RelayOnce` 在读已提交事务里 `SELECT … WHERE published_at IS NULL ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED`，交给 `Publisher` 接口发送，只给确认收到的事件 `UPDATE published_at = NOW()`（部分失败时已确认的照常提交）；`Run` 空闲每秒一轮、发满一批立即再领、失败退避 1→2→4…最多 30 秒、成功后重置、每小时 `DeletePublished`（发出满 7 天，每次 DELETE 最多 1000 行，删到不足 1000 行）。`internal/mq`：`DeclareTopology` 声明 topic 交换机 `gostream.events`、quorum 队列 `gostream.notifications`（绑定 like.created、comment.created，x-delivery-limit 5，死信到 fanout 交换机 `gostream.events.dead` → 队列 `gostream.notifications.dead`）；`Publisher` 开发布确认、mandatory 发布，被退回或超时的不算成功，出错后关通道下次重连，错误不含 URL。`cmd/worker` 只读 `GOSTREAM_DSN`、`GOSTREAM_AMQP_URL`（`config.LoadWorker`），收到 SIGTERM 退出；Dockerfile 多编译 `gostream-worker`，Compose 新增 worker 服务（同一镜像、自己的 entrypoint）。新依赖 amqp091-go v1.16.0。测试：假驱动 + `testing/synctest` 的投递员单元测试，真实 MySQL 的 SKIP LOCKED/读已提交/清理，真实 RabbitMQ 的消息属性/退回/重连/死信，MySQL + RabbitMQ 的 worker 端到端；实测默认可重复读会让投递员占着一批时新事件插入超时，读已提交不会。gostream-dev 已重建 api 并启动 worker，此前积压的 4 条事件已发出并进入通知队列；Windows 全量（带一次性 MySQL 和 RabbitMQ，`-p 1`）、Linux vet/race、隔离 Compose 真实浏览器验收（第二个账号点赞后消息进通知队列、worker SIGTERM 退出码 0、重建后消息仍在）通过。注意：管理接口“取消息再放回”也算一次投递，对 quorum 队列计入 5 次上限。下一步：M4 第三步消费者（写通知表、事件 ID 去重、ACK、死信）。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -309,7 +317,7 @@ M4 第一步（2026-11-12）：事件发件箱已完成。新表 `outbox_events`
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
 | M3 | 已完成：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线、限流、认证刷新与撤销 |
-| M4 | 进行中：第一步同事务 Outbox 已完成；余下投递员（RabbitMQ、独立 Worker）、消费者（幂等/ACK/重试/死信）、通知列表、鉴权 SSE |
+| M4 | 进行中：同事务 Outbox、投递员（独立 worker 发到 RabbitMQ）已完成；余下消费者（幂等/ACK/重试/死信）、通知列表、鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |
 

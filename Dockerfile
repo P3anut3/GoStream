@@ -13,7 +13,8 @@ RUN go mod download
 
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/gostream ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/gostream ./cmd/server \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/gostream-worker ./cmd/worker
 
 # Optional Linux verification target; the final runtime does not depend on it.
 FROM builder AS checks
@@ -27,6 +28,8 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /out/gostream ./gostream
+# The worker shares this image; Compose starts it with its own entrypoint.
+COPY --from=builder /out/gostream-worker ./gostream-worker
 COPY --from=frontend /web/dist/ ./web/dist/
 COPY internal/config/config.yaml ./internal/config/config.yaml
 

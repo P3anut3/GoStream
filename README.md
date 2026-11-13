@@ -23,9 +23,10 @@
 - 最新流时间线缓存：`GET /feed` 先读 Redis 里最新 500 条视频的时间线（有序集合存顺序，哈希存公开字段），超出这 500 条或 Redis 故障时回源 MySQL；作者名和点赞信息每次查询。发布、删除作品后时间线整条失效，下次读取时重建。
 - 限流：登录（每个 IP 每分钟 10 次）、注册（每个 IP 每小时 10 个）、刷新登录凭证（每个 IP 每分钟 30 次）以及发布、上传、评论、点赞、关注、删除等写操作（每个用户每分钟共 60 次）使用固定窗口计数，超过上限返回 429 和 `Retry-After`。计数放在 Redis 里供所有实例共用，Redis 故障或未配置时改用单机计数。
 - 登录会话：refresh token 7 天滑动过期，每次刷新都换新的，已换掉的旧 token 再被使用时注销整个会话；会话存在 Redis（只存哈希），未配置 Redis 时存在本进程内存。刷新页面不用重新登录，退出登录在服务端生效。
-- 事件发件箱（M4 第一步）：点赞和评论成功时，在同一个 MySQL 事务里往 `outbox_events` 写一条待发送事件（`like.created`、`comment.created`，只存 ID）；重复点赞、给自己的视频点赞或评论都不写。事件先存在发件箱里，由 M4 第二步的投递员发到 RabbitMQ。
+- 事件发件箱（M4 第一步）：点赞和评论成功时，在同一个 MySQL 事务里往 `outbox_events` 写一条待发送事件（`like.created`、`comment.created`，只存 ID）；重复点赞、给自己的视频点赞或评论都不写。事件先存在发件箱里，再由投递员发到 RabbitMQ（见下一条）。
+- 投递员 worker（M4 第二步）：独立进程 `cmd/worker` 每秒用 `FOR UPDATE SKIP LOCKED` 从发件箱领一批待发送事件，发到 RabbitMQ 的 topic 交换机 `gostream.events`（routing key 是事件类型）；RabbitMQ 确认收到、且没有因为无队列接收而退回时，才填上 `published_at`。RabbitMQ 不可用时事件留在发件箱，退避重试后自动补发；每小时删除发出满 7 天的事件。通知队列 `gostream.notifications` 已经建好，消息在第三步的消费者写成通知之前在队列里排队。
 
-当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；RabbitMQ 尚未接入（点赞、评论的事件已写进发件箱，等待第二步的投递员发送）；当前仍为单进程模块化应用。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；已通过 amqp091-go 接入 RabbitMQ（worker 进程发送发件箱事件），消费者还未实现；API 仍为单进程模块化应用，另有独立的 worker 进程。
 
 ## Compose 快速启动
 
@@ -36,7 +37,7 @@ Docker Desktop 运行后，在项目根目录执行：
 docker compose --env-file .env.compose up -d --build --wait --wait-timeout 180
 ```
 
-访问 `http://127.0.0.1:19080/`；RabbitMQ 管理页面为 `http://127.0.0.1:15674/`，账号 `gostream`、密码在本机忽略文件 `.env.compose`。初始化脚本不会覆盖已有文件。
+访问 `http://127.0.0.1:19080/`；RabbitMQ 管理页面为 `http://127.0.0.1:15674/`，账号 `gostream`、密码在本机忽略文件 `.env.compose`。初始化脚本不会覆盖已有文件。Compose 共五个服务：api、worker（发件箱投递员，和 api 用同一个镜像，入口是 `/app/gostream-worker`，不对外开放端口）、mysql、redis、rabbitmq。
 
 这套环境使用独立数据库和上传卷，不会自动导入 Windows MySQL 的旧账号、作品和本机 uploads 文件。普通 `docker compose --env-file .env.compose down` 保留数据；`down -v` 会删除卷。端口、服务名、初始化规则和测试方法见 [Compose 学习说明](docs/learning/12_compose_environment.md)。下面的“环境与启动”是直接在本机运行 Go 的另一种方式。
 
@@ -304,6 +305,19 @@ try {
 }
 ```
 
+投递员、RabbitMQ 发布器和 worker 的测试还要 `GOSTREAM_TEST_AMQP_URL` 指向一次性 RabbitMQ（`TestRelayMySQLIntegration` 和 `TestWorkerDeliversOutboxEvents` 同时要上面的 `GOSTREAM_TEST_MYSQL_DSN`）。RabbitMQ 镜像自带的 guest 账号只能从容器内部连接，所以要另设账号；这些测试共用同一组队列，要用 `-p 1` 让测试包依次运行：
+
+```powershell
+docker run -d --rm --name gostream-test-rabbit -p 127.0.0.1:15699:5672 -e RABBITMQ_DEFAULT_USER=test -e RABBITMQ_DEFAULT_PASS=test rabbitmq:4.2-management
+$env:GOSTREAM_TEST_AMQP_URL = 'amqp://test:test@127.0.0.1:15699/'
+try {
+    go test -v -p 1 ./internal/outbox ./internal/mq ./cmd/worker -count=1
+} finally {
+    Remove-Item Env:GOSTREAM_TEST_AMQP_URL -ErrorAction SilentlyContinue
+    docker rm -f gostream-test-rabbit
+}
+```
+
 当前环境可能打印 Sonic 不支持该 Go 版本并回退到 `encoding/json` 的警告；已观察到现有测试可通过，不表示已完成依赖兼容性验证。
 
 ## 文件导航
@@ -329,18 +343,20 @@ try {
 | `internal/video/video_repository.go`、`video_cache.go`、`video_local_cache.go`、`video_service.go` | 视频详情与删除的 MySQL 访问、Redis 缓存、进程内缓存以及 Cache-Aside 与 singleflight 规则 |
 | `internal/feed/timeline.go` | 最新流的 Redis 时间线：按发布时间排序的 ID、公开字段、窗口哨兵与整条重建 |
 | `internal/ratelimit/` | 固定窗口限流：Redis 计数、单机计数、Redis 故障时的降级包装和 Gin 中间件 |
-| `internal/outbox/` | 事件发件箱：事件类型和内容（`events.go`），在调用方的事务里写一行待发送事件（`outbox.go`） |
+| `internal/outbox/` | 事件发件箱：事件类型和内容（`events.go`），在调用方的事务里写一行待发送事件（`outbox.go`），投递员领取、发送、标记和清理（`relay.go`） |
+| `internal/mq/` | RabbitMQ：声明交换机、通知队列和死信队列（`topology.go`），带发布确认和 mandatory 的发布器，断线后重连（`publisher.go`） |
+| `cmd/worker/` | 后台进程：读取 worker 配置（`internal/config/worker.go`），运行发件箱投递员，收到 SIGTERM 后退出 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
 | `.github/workflows/ci.yml` | Go 检查/race、前端检查/构建和浏览器夹具回归 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，HTTP 服务仍是一个进程，另有独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`、`feed`、`follow`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询、关注关系也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
+目录按业务和职责分包，HTTP 服务仍是一个进程，另有后台投递进程 `cmd/worker` 和独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`、`feed`、`follow`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询、关注关系也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱已完成（点赞、评论与事件在同一个事务里提交）；接下来是投递员（`cmd/worker`）把发件箱里的事件发到 RabbitMQ，然后是消费者写通知、通知列表和 SSE 提醒。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱（点赞、评论与事件在同一个事务里提交）和第二步投递员（`cmd/worker` 把发件箱里的事件发到 RabbitMQ）已完成；接下来是消费者写通知（第三步），然后是通知列表和 SSE 提醒。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -532,4 +548,22 @@ Redis 故障时的取舍：鉴权中间件查不了会话，就只按签名和�
 - 写事件失败时整个事务回滚，点赞或评论也不保存，接口返回 500。
 - payload 以字符串传入：DSN 开启 `interpolateParams` 时，`[]byte` 会被拼成二进制字符串，MySQL 的 JSON 列会拒绝（错误 3144）。
 
-默认测试用一个支持事务的假驱动检查：点赞和评论在一个事务里依次执行插入、查作者、写事件，每条 SQL 都在事务的连接上；成功时提交，任何一步失败都回滚；开启或提交事务失败时如实返回错误；评论失败时返回 ID 0 和安全的提示文字；事件类型和 JSON 字段名固定不变。`TestOutboxMySQLIntegration`（真实 MySQL）检查 `schema.sql` 与 007 迁移建出的表结构完全一致；第一次点赞、评论各留下一条内容正确、`published_at` 为 NULL 的事件；重复点赞、给自己的视频、不存在的视频都不留事件；取消点赞不留事件，再点赞再留一条；8 个并发重复点赞只留一条；发件箱表不可用时点赞和评论都回滚。还没有发送事件的投递员，`published_at` 目前一直是 NULL。
+默认测试用一个支持事务的假驱动检查：点赞和评论在一个事务里依次执行插入、查作者、写事件，每条 SQL 都在事务的连接上；成功时提交，任何一步失败都回滚；开启或提交事务失败时如实返回错误；评论失败时返回 ID 0 和安全的提示文字；事件类型和 JSON 字段名固定不变。`TestOutboxMySQLIntegration`（真实 MySQL）检查 `schema.sql` 与 007 迁移建出的表结构完全一致；第一次点赞、评论各留下一条内容正确、`published_at` 为 NULL 的事件；重复点赞、给自己的视频、不存在的视频都不留事件；取消点赞不留事件，再点赞再留一条；8 个并发重复点赞只留一条；发件箱表不可用时点赞和评论都回滚。投递员发送成功后才会填上 `published_at`，见下一节。
+
+### 投递员 worker（M4 第二步）
+
+`cmd/worker` 是和 API 分开运行的进程，只需要 `GOSTREAM_DSN` 和 `GOSTREAM_AMQP_URL`（形如 `amqp://用户名:密码@主机:5672/`，密码里的特殊字符要做 URL 编码；格式不对时启动失败，错误信息不回显地址），不需要 JWT 等 API 用的密钥。Compose 的 worker 服务和 API 用同一个镜像，入口是 `/app/gostream-worker`。
+
+`outbox.Relay`（`internal/outbox/relay.go`）每一轮：在读已提交的事务里用 `SELECT … WHERE published_at IS NULL ORDER BY id LIMIT 100 FOR UPDATE SKIP LOCKED` 领一批 → 交给发布器 → 只给 RabbitMQ 确认收到的事件填 `published_at = NOW()` → 提交。先发送、确认后再标记，中途出错最多重复发送，不会丢事件（至少一次）；重复的消息由第三步的消费者按事件 ID 去重。多个 worker 同时运行时，`SKIP LOCKED` 让它们领不同的行。读已提交不加间隙锁：如果用默认的可重复读，投递员占着一批事件期间，新的点赞往发件箱插入事件会被挡住（测试里 3 秒后超时），读已提交下则立即完成。
+
+`Run` 在发件箱为空时每秒查一次；刚好发满一批就马上领下一批；出错时等待 1、2、4……秒，最长 30 秒，成功一次后恢复正常节奏；收到 SIGTERM 或 Ctrl+C 时，当前这一批没有标记的事件随事务回滚，下次启动再发。启动时和此后每小时删除发出满 7 天的事件（`published_at < NOW() - INTERVAL 7 DAY`，每条 DELETE 最多 1000 行，删到不足 1000 行为止；还没发送的行 `published_at` 为 NULL，不会被删除）。
+
+`mq.Publisher`（`internal/mq`）：
+
+- 每次连接时声明拓扑：topic 交换机 `gostream.events`；quorum 队列 `gostream.notifications`，绑定 `like.created`、`comment.created`，投递超过 5 次的消息进死信交换机；死信交换机 `gostream.events.dead`（fanout）和死信队列 `gostream.notifications.dead`。队列参数建好后不能修改（参数不同会报 PRECONDITION_FAILED），所以第三步要用的死信设置在这一步一起建好。
+- 每条消息：routing key 和 `type` 都是事件类型，`message_id` 是发件箱 id，`content_type` 为 `application/json`，持久化，`timestamp` 为事件创建时间，消息体是 payload。
+- 开启发布确认，并以 mandatory 方式发布：只有确认收到、且没有因为无队列接收而被退回的事件才算发送成功。被退回或等确认超时（5 秒）的事件留在发件箱，下一轮重发；出错后关掉当前通道，下一次重新连接。
+
+已知限制：消息要等第三步的消费者处理，目前在 `gostream.notifications` 里排队；单节点 RabbitMQ 的磁盘数据丢失（例如 `down -v`）会丢掉已经确认的消息，生产环境应使用多节点集群，必要时可以把一段时间内的 `published_at` 改回 NULL 重新发送（消费者按事件 ID 去重）；还没有监控死信队列。
+
+默认测试覆盖：投递员用假数据库检查读已提交、领取语句、只标记确认收到的事件、部分失败时已确认的照常提交、领取或标记失败时回滚；用 `testing/synctest` 的虚拟时钟检查退避（上限 5 秒时为 1、2、4、5、5 秒）、成功后重置、发满一批立即再领、每小时清理、取消后立即返回；`DeletePublished` 分 1000、1000、500 三轮删除。`TestRelayMySQLIntegration`（MySQL）检查按 ID 顺序发送并标记、部分确认、第二个投递员跳过被锁的行、投递员占着一批时仍能插入新事件、只删除旧的已发送事件。`TestPublisherRabbitMQIntegration`（RabbitMQ）检查消息属性、被退回的事件不算成功、断线后自动重连、被拒绝的消息进死信队列；`TestWorkerDeliversOutboxEvents`（MySQL + RabbitMQ）检查 RabbitMQ 不可用时事件留在发件箱、可用后全部送达、取消后干净退出。隔离 Compose 验收用第二个账号点赞，确认 `like.created` 消息进入通知队列且容器重建后仍在，并确认 worker 收到 SIGTERM 后以退出码 0 结束。

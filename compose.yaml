@@ -92,6 +92,23 @@ services:
       retries: 12
       start_period: 10s
 
+  # Outbox relay: sends the like and comment events in outbox_events to RabbitMQ. It uses the API
+  # image with its own entrypoint, retries with backoff while MySQL or RabbitMQ is unavailable and
+  # stops cleanly on SIGTERM. It needs no ports and none of the API's signing secrets.
+  worker:
+    image: gostream-api:dev
+    entrypoint: ["/app/gostream-worker"]
+    restart: unless-stopped
+    stop_grace_period: 10s
+    environment:
+      GOSTREAM_DSN: "gostream:${COMPOSE_MYSQL_PASSWORD:?Run scripts/init-compose-env.ps1 first}@tcp(mysql:3306)/gostream?charset=utf8mb4&parseTime=true&loc=Local"
+      GOSTREAM_AMQP_URL: "amqp://${COMPOSE_RABBITMQ_USER:-gostream}:${COMPOSE_RABBITMQ_PASSWORD:?Run scripts/init-compose-env.ps1 first}@rabbitmq:5672/"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
 volumes:
   mysql_data:
   redis_data:

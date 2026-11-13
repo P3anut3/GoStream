@@ -116,11 +116,12 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 业务目标：互动成功后可靠产生作者提醒；服务故障后可以补处理。
 
 - 事件（第一步已实现）：event_type 为 like.created 或 comment.created，同时是发到 RabbitMQ 的 routing key；payload 只含 ID（actor_id、author_id、video_id，评论另有 comment_id），不携带密码、token 或会变的展示内容；event_id 用发件箱自增的 id，时间用 created_at。没有 version 字段：以后改 payload 要兼容已经写入的旧事件。
-- 表 outbox_events（第一步已实现，007 迁移）：id、event_type、payload JSON、created_at、published_at（NULL 为待发送），索引 (published_at, id)；由 internal/outbox 的 Add 在业务事务里写入。投递员的领取和重试方案在第二步确定。
+- 表 outbox_events（第一步已实现，007 迁移）：id、event_type、payload JSON、created_at、published_at（NULL 为待发送），索引 (published_at, id)；由 internal/outbox 的 Add 在业务事务里写入。
+- 投递员（第二步已实现，internal/outbox/relay.go）：读已提交事务里按 id 用 SELECT … FOR UPDATE SKIP LOCKED 领取最多 100 条待发事件，多个 worker 不会领到同一条；读已提交不加间隙锁，领取期间新事件仍可写入（可重复读下会被挡住，已实测）。先发布、等确认，再只给已确认的事件写 published_at，同一事务提交；失败等待 1、2、4… 秒，最多 30 秒，成功后恢复每秒轮询；每小时按 MySQL 时钟分批（每批 1000 行）删除发出满 7 天的事件。
 - 拟定表 notifications：id、recipient_id、event_id、类型、关联作品、已读状态、创建时间；(recipient_id,event_id) 唯一。
-- RabbitMQ：确认发布、持久化配置、失败重试与隔离；消息投递按可能重复处理，不宣称恰好一次。
+- RabbitMQ（发布端第二步已实现，internal/mq）：topic 交换机 gostream.events，routing key 即事件类型；仲裁队列 gostream.notifications 绑定 like.created、comment.created，x-delivery-limit 为 5，超过或被拒绝的消息经 fanout 交换机 gostream.events.dead 进 gostream.notifications.dead。发布用持久消息，message_id 为事件 ID，开启 publisher confirms 并以 mandatory 发布（没有队列接收会被退回，按未确认处理）；出错后关闭通道，下次重新连接。消息投递按可能重复处理，不宣称恰好一次。
 - 业务事务提交但发布失败：outbox 保留待发；发布成功但标记失败：允许重发，由消费者去重。
-- Worker：发布器与消费者可作为 cmd/worker 的任务运行，支持 context 取消、断线恢复和明确退出。
+- Worker（第二步已实现投递部分）：cmd/worker 只读取 GOSTREAM_DSN、GOSTREAM_AMQP_URL；启动时连不上 MySQL 直接报错退出（Compose 会重启它），运行中 MySQL 或 RabbitMQ 不可用时退避重试、不退出；SIGTERM 或 Ctrl+C 取消 context，未标记的事件随事务回滚，进程以退出码 0 结束。消费者在第三步作为同一进程的另一个任务加入。
 - 拟定接口：GET /notifications、PATCH /notifications/:id/read、GET /notifications/stream。
 - 通知只给接收者读取；SSE 通道不能信任客户端传来的 recipient_id。
 - SSE 鉴权在浏览器客户端实现阶段选定：可用带 Authorization 的 fetch 读取流；不把长期 JWT 放在 URL 中。

@@ -226,10 +226,87 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 		t.Fatal("RabbitMQ test message was not routed")
 	}
 	t.Log("four services healthy; non-root upload, publish, Redis auth/write and durable RabbitMQ message verified")
+
+	// The worker delivers outbox events: another account likes the video, and the like.created
+	// event reaches the notifications queue as a persistent message.
+	workerID := run(true, "ps", "-q", "worker")
+	if run(false, "inspect", "--format", "{{.State.Status}}", workerID) != "running" {
+		t.Fatal("the worker must be running")
+	}
+	var author, fan struct {
+		ID uint64 `json:"id"`
+	}
+	if err := json.Unmarshal(request(apiBase, "GET", "/me", login.Token, nil, "", 200, false), &author); err != nil || author.ID == 0 {
+		t.Fatal("Compose current user failed")
+	}
+	fanCredentials := map[string]string{"username": "compose_fan", "password": randomHex()[:32]}
+	if err := json.Unmarshal(jsonRequest(apiBase, "POST", "/users", "", fanCredentials, 201, false), &fan); err != nil || fan.ID == 0 {
+		t.Fatal("Compose second account failed")
+	}
+	var fanLogin struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(jsonRequest(apiBase, "POST", "/login", "", fanCredentials, 200, false), &fanLogin); err != nil || fanLogin.Token == "" {
+		t.Fatal("Compose second login failed")
+	}
+	request(apiBase, "PUT", fmt.Sprintf("/videos/%d/like", published.ID), fanLogin.Token, nil, "", 204, false)
+	type queued struct {
+		Payload    string `json:"payload"`
+		RoutingKey string `json:"routing_key"`
+		Properties struct {
+			MessageID    string `json:"message_id"`
+			Type         string `json:"type"`
+			DeliveryMode int    `json:"delivery_mode"`
+		} `json:"properties"`
+	}
+	// Wait until the worker has sent every outbox event, the browser test's included.
+	pendingEvents := func() string {
+		t.Helper()
+		return run(true, "exec", "-T", "mysql", "sh", "-c", `MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -N -e "SELECT COUNT(*) FROM outbox_events WHERE published_at IS NULL"`)
+	}
+	for deadline := time.Now().Add(30 * time.Second); pendingEvents() != "0"; time.Sleep(250 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the worker did not deliver the outbox events")
+		}
+	}
+	// peek reads the queued notifications without consuming them. Every read returns the messages
+	// to the queue, which counts toward its limit of five deliveries, so the test reads only twice.
+	peek := func() []queued {
+		t.Helper()
+		var messages []queued
+		if err := json.Unmarshal(jsonRequest(mqBase, "POST", "/api/queues/%2F/gostream.notifications/get", "", map[string]any{"count": 100, "ackmode": "reject_requeue_true", "encoding": "auto", "truncate": 50000}, 200, true), &messages); err != nil {
+			t.Fatal("cannot read the notifications queue")
+		}
+		return messages
+	}
+	// fanLike finds the fan's like of the published video among the queued messages.
+	fanLike := func(messages []queued) (queued, bool) {
+		for _, message := range messages {
+			var event struct {
+				ActorID  uint64 `json:"actor_id"`
+				AuthorID uint64 `json:"author_id"`
+				VideoID  uint64 `json:"video_id"`
+			}
+			if json.Unmarshal([]byte(message.Payload), &event) == nil && event.ActorID == fan.ID && event.AuthorID == author.ID && event.VideoID == published.ID {
+				return message, true
+			}
+		}
+		return queued{}, false
+	}
+	message, found := fanLike(peek())
+	if !found || message.RoutingKey != "like.created" || message.Properties.Type != "like.created" || message.Properties.MessageID == "" || message.Properties.DeliveryMode != 2 {
+		t.Fatalf("the fan's like.created event must wait in the notifications queue as a persistent message, got %+v", message)
+	}
+	t.Log("worker delivered the like.created event to the notifications queue")
+
 	apiID := run(true, "ps", "-q", "api")
 	run(true, "stop", "--timeout", "8", "api")
 	if run(false, "inspect", "--format", "{{.State.ExitCode}}", apiID) != "0" {
 		t.Fatal("Compose default SIGTERM shutdown failed")
+	}
+	run(true, "stop", "--timeout", "8", "worker")
+	if run(false, "inspect", "--format", "{{.State.ExitCode}}", workerID) != "0" {
+		t.Fatal("the worker must exit cleanly on SIGTERM")
 	}
 	volumesBefore := strings.Fields(run(false, "volume", "ls", "--filter", selector, "--format", "{{.Name}}"))
 	if len(volumesBefore) != 4 {
@@ -261,6 +338,9 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	}
 	if err := json.Unmarshal(jsonRequest(mqBase, "POST", "/api/queues/%2F/compose-fixture/get", "", map[string]any{"count": 1, "ackmode": "ack_requeue_false", "encoding": "auto", "truncate": 50000}, 200, true), &messages); err != nil || len(messages) != 1 || messages[0].Payload != "persistent-message" {
 		t.Fatal("durable RabbitMQ message missing after container recreation")
+	}
+	if kept, found := fanLike(peek()); !found || kept.Properties.MessageID != message.Properties.MessageID {
+		t.Fatal("the delivered notification event must survive container recreation")
 	}
 	t.Log("after down/up: account/JWT, video record, uploaded file, Redis value and RabbitMQ message retained")
 }
