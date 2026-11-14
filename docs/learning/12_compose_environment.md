@@ -4,6 +4,8 @@
 
 更新（2026-11-13，M4 第二步）：新增 worker 服务（发件箱投递员），Compose 现为五个服务。worker 复用 `gostream-api:dev` 镜像，入口是 `/app/gostream-worker`，只注入 `GOSTREAM_DSN` 和 `GOSTREAM_AMQP_URL`，不开放端口；等 MySQL、RabbitMQ 健康后启动，运行中二者不可用时退避重试，`docker stop` 时以退出码 0 结束。本机 gostream-dev 已换新镜像并启动 worker，发件箱里已有的 4 条事件已发到通知队列。下文第 6 节的编号列表是 2026-11-02 四服务时的记录。
 
+更新（2026-11-14，M4 第三步）：worker 同时运行通知消费者，把通知队列里的事件写进新表 notifications（008 迁移），服务数不变。gostream-dev 已经用户同意执行 008，并用 `up -d --no-build --no-deps --wait api worker` 只重建这两个容器；此前排队的 4 条消息变成作者 1 的 4 条通知，通知队列清空，死信队列为 0。
+
 本机 `gostream-dev` 开发栈已启动，四服务均 healthy；首页返回 200，`/healthz` 和 `/readyz` 均返回 ok。使用全新的开发卷，没有导入原 Windows MySQL 数据。原停止状态的 redis 容器和原本机配置保留。
 
 ## 1. 这一轮解决什么问题
@@ -19,11 +21,11 @@ flowchart LR
     API --> FILES[(uploads_data)]
     DB --> DATA[(mysql_data)]
     API -.->|redis:6379 缓存、限流、会话| R[Redis] --> RD[(redis_data)]
-    W[Worker 投递员] -->|mysql:3306 领取事件| DB
-    W -->|rabbitmq:5672 发布事件| MQ[RabbitMQ] --> MD[(rabbitmq_data)]
+    W[Worker 投递员与消费者] -->|mysql:3306 领取事件、写通知| DB
+    W -->|rabbitmq:5672 发布事件、消费通知| MQ[RabbitMQ] --> MD[(rabbitmq_data)]
 ```
 
-M3 起 API 通过 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 连接 Redis，用于缓存、限流计数和登录会话（虚线表示运行中 Redis 故障时 API 仍可服务：读请求回源 MySQL，已登录的请求按签名放行，登录和刷新暂时返回 503）。M4 第二步起 worker 从 MySQL 领取发件箱事件、发到 RabbitMQ；API 本身不连接 RabbitMQ。
+M3 起 API 通过 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 连接 Redis，用于缓存、限流计数和登录会话（虚线表示运行中 Redis 故障时 API 仍可服务：读请求回源 MySQL，已登录的请求按签名放行，登录和刷新暂时返回 503）。M4 第二步起 worker 从 MySQL 领取发件箱事件、发到 RabbitMQ，第三步起再从通知队列取回事件、写成通知；API 本身不连接 RabbitMQ。
 
 ## 2. 首次启动与日常使用
 
@@ -72,7 +74,7 @@ API 容器里的 `127.0.0.1` 是 API 容器自己，并不是 Windows，也不�
 
 ## 4. 初始化与健康检查
 
-新建 MySQL 数据卷第一次启动时，官方镜像执行只读挂载的 `scripts/schema.sql`，创建全部业务表（当前七张，含 006 的 follows 和 007 的 outbox_events）。复用已有数据库卷时不会重新执行初始化脚本；以后表结构改变仍需要显式执行迁移，不能只改 schema 后重启。
+新建 MySQL 数据卷第一次启动时，官方镜像执行只读挂载的 `scripts/schema.sql`，创建全部业务表（当前八张，含 006 的 follows、007 的 outbox_events 和 008 的 notifications）。复用已有数据库卷时不会重新执行初始化脚本；以后表结构改变仍需要显式执行迁移，不能只改 schema 后重启。
 
 MySQL 健康检查使用应用账号连接数据库，并确认 users 表可查询。API 的 `depends_on: mysql: condition: service_healthy` 等待这个条件满足后启动；API 自身使用 `/readyz` 做健康检查。Redis 通过带密码的 PING 检查，RabbitMQ 检查节点运行状态。
 
@@ -108,7 +110,9 @@ Compose 测试使用随机项目名、独立随机凭证、随机本机端口和
 
 显式测试结果：`TestContainerAPIIntegration` PASS（约 25 秒），`TestComposeEnvironmentIntegration` PASS（约 48 秒）；`go test ./...`、`go vet ./...` 通过。时间仅为本机本轮运行记录，不是性能结论。
 
-M4 第二步（2026-11-13）扩展了 Compose 测试：确认 worker 在运行；第二个账号点赞后，等发件箱没有待发事件，再用管理 API 查看通知队列，找到这次点赞的 `like.created` 消息（查看后放回队列，最多查看两次，因为每次查看都计入仲裁队列的投递次数上限）；默认 SIGTERM 停止 worker，退出码为 0；重建全部容器后这条消息仍在队列里。本轮 `TestComposeEnvironmentIntegration` 通过。
+M4 第二步（2026-11-13）扩展了 Compose 测试：确认 worker 在运行；第二个账号点赞后，等发件箱没有待发事件，再用管理 API 查看通知队列，找到这次点赞的 `like.created` 消息（查看后放回队列，最多查看两次，因为每次查看都计入仲裁队列的投递次数上限）；默认 SIGTERM 停止 worker，退出码为 0；重建全部容器后这条消息仍在队列里。本轮 `TestComposeEnvironmentIntegration` 通过。（第三步起改为下面的检查。）
+
+M4 第三步（2026-11-14）把这部分改为检查通知：第二个账号点赞后，等作者有了这条点赞通知、发件箱没有待发事件、通知队列清空（用容器里的 `rabbitmqctl list_queues` 计数，不取消息），并确认死信队列为空；默认 SIGTERM 停止 worker（退出码 0）后再评论一次，确认事件留在发件箱、还没有通知；重建全部容器后，点赞通知仍然只有一条，评论在 worker 重新启动后变成通知。本轮带真实浏览器的 `TestComposeEnvironmentIntegration` 通过（约 60 秒，本机记录，不是性能结论）。
 
 准备好四个本地镜像后可复现 Compose 测试：
 
@@ -121,10 +125,10 @@ try {
 }
 ```
 
-普通测试默认跳过 Docker 测试。Compose 测试不自动构建或拉取镜像；先构建 `gostream-api:dev` 并准备 Compose 使用的 MySQL、Redis、RabbitMQ 镜像。测试使用 RabbitMQ 管理 HTTP API 作为探针；GoStream 自己的 AMQP 连接在 worker 里（M4 第二步）。上传的是文件头识别测试字节，没有证明真实视频解码；播放能力沿用 M0 的实际浏览器验收，Compose 中可再上传真实 MP4 手动检查。
+普通测试默认跳过 Docker 测试。Compose 测试不自动构建或拉取镜像；先构建 `gostream-api:dev` 并准备 Compose 使用的 MySQL、Redis、RabbitMQ 镜像。测试使用 RabbitMQ 管理 HTTP API 作为探针，队列计数用容器里的 rabbitmqctl 读取；GoStream 自己的 AMQP 连接都在 worker 里（第二步发布、第三步消费）。上传的是文件头识别测试字节，没有证明真实视频解码；播放能力沿用 M0 的实际浏览器验收，Compose 中可再上传真实 MP4 手动检查。
 
 ## 7. 下一步与阅读检查
 
-Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成；M3 已接入 Redis；M4 第二步起 worker 向 RabbitMQ 发布事件，消费在第三步。
+Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成；M3 已接入 Redis；M4 第二步起 worker 向 RabbitMQ 发布事件，第三步起也消费通知队列、写成通知。
 
 先尝试回答：API 为什么访问 mysql:3306，而你在 Windows 连接数据库却使用 127.0.0.1:13307？如果只删 API 容器，作品记录和视频文件分别靠什么保留？

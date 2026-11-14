@@ -227,8 +227,8 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	}
 	t.Log("four services healthy; non-root upload, publish, Redis auth/write and durable RabbitMQ message verified")
 
-	// The worker delivers outbox events: another account likes the video, and the like.created
-	// event reaches the notifications queue as a persistent message.
+	// The worker turns outbox events into notifications: another account likes the video, and
+	// the author gets a like notification while the notifications queue drains.
 	workerID := run(true, "ps", "-q", "worker")
 	if run(false, "inspect", "--format", "{{.State.Status}}", workerID) != "running" {
 		t.Fatal("the worker must be running")
@@ -250,63 +250,65 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 		t.Fatal("Compose second login failed")
 	}
 	request(apiBase, "PUT", fmt.Sprintf("/videos/%d/like", published.ID), fanLogin.Token, nil, "", 204, false)
-	type queued struct {
-		Payload    string `json:"payload"`
-		RoutingKey string `json:"routing_key"`
-		Properties struct {
-			MessageID    string `json:"message_id"`
-			Type         string `json:"type"`
-			DeliveryMode int    `json:"delivery_mode"`
-		} `json:"properties"`
+	// mysqlValue runs one query as the application user inside the MySQL container.
+	mysqlValue := func(query string) string {
+		t.Helper()
+		return run(true, "exec", "-T", "mysql", "sh", "-c", `MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -N -e "`+query+`"`)
 	}
-	// Wait until the worker has sent every outbox event, the browser test's included.
 	pendingEvents := func() string {
 		t.Helper()
-		return run(true, "exec", "-T", "mysql", "sh", "-c", `MYSQL_PWD="$MYSQL_PASSWORD" mysql -u"$MYSQL_USER" "$MYSQL_DATABASE" -N -e "SELECT COUNT(*) FROM outbox_events WHERE published_at IS NULL"`)
+		return mysqlValue("SELECT COUNT(*) FROM outbox_events WHERE published_at IS NULL")
 	}
-	for deadline := time.Now().Add(30 * time.Second); pendingEvents() != "0"; time.Sleep(250 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("the worker did not deliver the outbox events")
-		}
-	}
-	// peek reads the queued notifications without consuming them. Every read returns the messages
-	// to the queue, which counts toward its limit of five deliveries, so the test reads only twice.
-	peek := func() []queued {
+	// notified counts the author's notifications of the given type about the fan and the video.
+	notified := func(eventType string) string {
 		t.Helper()
-		var messages []queued
-		if err := json.Unmarshal(jsonRequest(mqBase, "POST", "/api/queues/%2F/gostream.notifications/get", "", map[string]any{"count": 100, "ackmode": "reject_requeue_true", "encoding": "auto", "truncate": 50000}, 200, true), &messages); err != nil {
-			t.Fatal("cannot read the notifications queue")
-		}
-		return messages
+		return mysqlValue(fmt.Sprintf("SELECT COUNT(*) FROM notifications WHERE recipient_id = %d AND actor_id = %d AND video_id = %d AND event_type = '%s'",
+			author.ID, fan.ID, published.ID, eventType))
 	}
-	// fanLike finds the fan's like of the published video among the queued messages.
-	fanLike := func(messages []queued) (queued, bool) {
-		for _, message := range messages {
-			var event struct {
-				ActorID  uint64 `json:"actor_id"`
-				AuthorID uint64 `json:"author_id"`
-				VideoID  uint64 `json:"video_id"`
-			}
-			if json.Unmarshal([]byte(message.Payload), &event) == nil && event.ActorID == fan.ID && event.AuthorID == author.ID && event.VideoID == published.ID {
-				return message, true
+	// queued counts a queue's messages, unacknowledged ones included, without touching them.
+	queued := func(queue string) string {
+		t.Helper()
+		for _, line := range strings.Split(run(true, "exec", "-T", "rabbitmq", "rabbitmqctl", "list_queues", "--quiet", "--no-table-headers", "name", "messages"), "\n") {
+			if fields := strings.Fields(line); len(fields) == 2 && fields[0] == queue {
+				return fields[1]
 			}
 		}
-		return queued{}, false
+		t.Fatalf("queue %s not found", queue)
+		return ""
 	}
-	message, found := fanLike(peek())
-	if !found || message.RoutingKey != "like.created" || message.Properties.Type != "like.created" || message.Properties.MessageID == "" || message.Properties.DeliveryMode != 2 {
-		t.Fatalf("the fan's like.created event must wait in the notifications queue as a persistent message, got %+v", message)
+	waitFor := func(what string, done func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(30 * time.Second); !done(); time.Sleep(250 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting until %s", what)
+			}
+		}
 	}
-	t.Log("worker delivered the like.created event to the notifications queue")
+	// Every outbox event is sent and every queued message handled, the browser test's included,
+	// and none of them ends up in the dead-letter queue.
+	waitFor("the fan's like becomes a notification", func() bool { return notified("like.created") == "1" })
+	waitFor("the outbox and the notifications queue are empty", func() bool {
+		return pendingEvents() == "0" && queued("gostream.notifications") == "0"
+	})
+	if queued("gostream.notifications.dead") != "0" {
+		t.Fatal("no event may end up in the dead-letter queue")
+	}
+	t.Log("worker turned the fan's like into a notification for the author")
+
+	// While the worker is stopped, a new comment waits in the outbox.
+	run(true, "stop", "--timeout", "8", "worker")
+	if run(false, "inspect", "--format", "{{.State.ExitCode}}", workerID) != "0" {
+		t.Fatal("the worker must exit cleanly on SIGTERM")
+	}
+	jsonRequest(apiBase, "POST", fmt.Sprintf("/videos/%d/comments", published.ID), fanLogin.Token, map[string]string{"content": "compose comment"}, 201, false)
+	if pendingEvents() != "1" || notified("comment.created") != "0" {
+		t.Fatal("while the worker is stopped the comment event must wait in the outbox")
+	}
 
 	apiID := run(true, "ps", "-q", "api")
 	run(true, "stop", "--timeout", "8", "api")
 	if run(false, "inspect", "--format", "{{.State.ExitCode}}", apiID) != "0" {
 		t.Fatal("Compose default SIGTERM shutdown failed")
-	}
-	run(true, "stop", "--timeout", "8", "worker")
-	if run(false, "inspect", "--format", "{{.State.ExitCode}}", workerID) != "0" {
-		t.Fatal("the worker must exit cleanly on SIGTERM")
 	}
 	volumesBefore := strings.Fields(run(false, "volume", "ls", "--filter", selector, "--format", "{{.Name}}"))
 	if len(volumesBefore) != 4 {
@@ -339,8 +341,11 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	if err := json.Unmarshal(jsonRequest(mqBase, "POST", "/api/queues/%2F/compose-fixture/get", "", map[string]any{"count": 1, "ackmode": "ack_requeue_false", "encoding": "auto", "truncate": 50000}, 200, true), &messages); err != nil || len(messages) != 1 || messages[0].Payload != "persistent-message" {
 		t.Fatal("durable RabbitMQ message missing after container recreation")
 	}
-	if kept, found := fanLike(peek()); !found || kept.Properties.MessageID != message.Properties.MessageID {
-		t.Fatal("the delivered notification event must survive container recreation")
+	// The recreated worker sends the waiting comment and turns it into a notification; the like
+	// notification is still there, once.
+	waitFor("the waiting comment becomes a notification", func() bool { return notified("comment.created") == "1" })
+	if notified("like.created") != "1" || pendingEvents() != "0" || queued("gostream.notifications.dead") != "0" {
+		t.Fatal("after recreation the like notification must be kept once and nothing may be left over")
 	}
-	t.Log("after down/up: account/JWT, video record, uploaded file, Redis value and RabbitMQ message retained")
+	t.Log("after down/up: account/JWT, video record, uploaded file, Redis value, RabbitMQ message and notification retained; the waiting comment became a notification")
 }
