@@ -18,7 +18,7 @@ npm run test:e2e
 
 build 先执行 vue-tsc 类型检查，再生成 `../web/dist`。从仓库根目录启动 Go 后即可访问已构建页面，不需要同时运行 Vite。Dockerfile 会自动完成前端构建。
 
-单元测试验证请求、会话隔离、Feed 分页、发布复用和通知（未读数轮询、游标续读、已读）；默认 Playwright 测试使用 API 响应夹具，不代表真实后端成功。真实双账号浏览器验收通过根目录的隔离 Compose 测试运行：
+单元测试验证请求、会话隔离、Feed 分页、发布复用和通知（未读数轮询、游标续读、已读、推送的事件解析、重连退避和退回轮询）；默认 Playwright 测试使用 API 响应夹具，不代表真实后端成功。真实双账号浏览器验收通过根目录的隔离 Compose 测试运行：
 
 ```powershell
 $env:GOSTREAM_COMPOSE_TEST='1'
@@ -36,4 +36,4 @@ try {
 
 access token 和草稿只在页面内存；refresh token 在 HttpOnly Cookie 里，页面脚本读不到。打开或刷新页面时，路由守卫先等 `session.restore()` 用 Cookie 换一个新的 access token，所以刷新页面不用重新登录（草稿仍会丢失）；access token 过期前 1 分钟自动续期，请求收到 401 时先刷新一次再重发。页面不持有 JWTSecret。Hash 路由避免与 /videos 等后端 API 路径冲突。
 
-通知（`src/stores/notifications.ts`、`src/views/NotificationsView.vue`）：登录后侧栏“通知”显示未读数，登录或恢复登录时查一次、之后每 60 秒查一次，查询失败时保留原来的数字，换账号时丢弃旧账号还没返回的结果。通知页按游标加载更多；点一条先标记已读再打开视频；“全部已读”带上已加载的最新一条的 id（`up_to`），之后才到的通知仍是未读。用户名、标题和评论内容按文本显示。`vite preview` 也会沿用开发代理，把接口请求转发到 19080。
+通知（`src/stores/notifications.ts`、`src/api/stream.ts`、`src/views/NotificationsView.vue`）：登录后侧栏“通知”显示未读数，登录或恢复登录时查一次，并打开推送连接 `/notifications/stream`。EventSource 不能带 Authorization 头，所以用 fetch 读 SSE 响应体、自己切出事件。推送连着时不轮询，收到提示才查未读数；推送断开、页面切到后台或服务端没有推送（404）时每 60 秒查一次，断开后按 1、2、4…最多 30 秒（乘 0.5～1 的随机数）重连，60 秒什么都没收到也会重连，401 时换一次 token。查询失败时保留原来的数字，换账号时丢弃旧账号还没返回的结果。通知页已经加载过列表、推送又带来新通知时，顶部提示“有新通知，点击刷新”。通知页按游标加载更多；点一条先标记已读再打开视频；“全部已读”带上已加载的最新一条的 id（`up_to`），之后才到的通知仍是未读。用户名、标题和评论内容按文本显示。`vite preview` 也会沿用开发代理，把接口请求转发到 19080。

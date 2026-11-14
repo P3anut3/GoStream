@@ -98,7 +98,7 @@ func TestBrowserAcceptanceEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(root)
-	router := newRouter(database.WrapSQL(pool), []byte("browser-test-only-jwt-key-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil, false)
+	router := newRouter(database.WrapSQL(pool), []byte("browser-test-only-jwt-key-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), nil, false, nil)
 	finish := make(chan struct{})
 	var once sync.Once
 	mux := http.NewServeMux()

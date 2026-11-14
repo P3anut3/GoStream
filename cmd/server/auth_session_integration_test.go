@@ -85,7 +85,7 @@ func TestAuthSessionHTTPIntegration(t *testing.T) {
 				redisClient = newRedisClient(redisServer.Addr(), "")
 				defer redisClient.Close()
 			}
-			server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), redisClient, false))
+			server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), redisClient, false, nil))
 			defer server.Close()
 			client := &http.Client{Timeout: 5 * time.Second}
 			// send returns the status, the body and the refresh cookie the response set ("" if none).

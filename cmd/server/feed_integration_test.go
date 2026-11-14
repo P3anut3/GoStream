@@ -102,7 +102,7 @@ func TestFeedHTTPMySQLIntegration(t *testing.T) {
 	}
 	insert(304, stamp.Add(time.Minute))
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
-	server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), nil, false))
+	server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), nil, false, nil))
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	get := func(query string, ids []uint64, more bool, viewer uint64) feed.ListResponse {

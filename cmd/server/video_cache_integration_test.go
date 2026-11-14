@@ -83,9 +83,9 @@ func TestVideoDetailCacheHTTPIntegration(t *testing.T) {
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
 	storage := newTestStorage(t)
 	// Each router has its own local cache; both share MySQL and Redis, like two API instances.
-	first := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false))
+	first := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false, nil))
 	defer first.Close()
-	second := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false))
+	second := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false, nil))
 	defer second.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	send := func(server *httptest.Server, method, path, token, contentType string, body io.Reader) (int, []byte) {

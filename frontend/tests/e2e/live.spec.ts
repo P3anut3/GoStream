@@ -86,6 +86,8 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
   await page.locator('#nav-mine').click(); await expect(page.locator('.video-card')).toHaveCount(6)
   await page.getByRole('button', { name: '下一页', exact: true }).click(); await expect(page.locator('.video-card')).toHaveCount(1)
 
+  // A's page holds a notification stream while B acts in another browser context.
+  await expect(page.locator('#nav-notifications')).toHaveAttribute('data-live', 'yes')
   const context = await browser.newContext({ baseURL })
   try {
     const bobPage = await context.newPage(); await bobPage.goto('/')
@@ -107,6 +109,9 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
     bobPage.once('dialog', dialog => dialog.accept())
     await bobPage.getByRole('button', { name: '删除评论', exact: true }).click()
     await expect(bobPage.locator('.comment-item')).toHaveCount(1)
+    // A's page neither reloads nor polls while its stream is open (polling waits 60 seconds):
+    // B's like and comment reach A's count through the worker, Redis and the stream.
+    await expect(page.locator('#nav-notifications .nav-count')).toHaveText('2', { timeout: 20000 })
     // B follows A from A's video; the relation is directed and survives navigation.
     const follow = bobPage.locator('.follow-button')
     await expect(follow).toBeEnabled(); await follow.click()

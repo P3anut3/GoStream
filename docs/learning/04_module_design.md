@@ -111,7 +111,7 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 页面：详情页作者信息下方的关注按钮；游客先登录，作者本人不显示，状态以后端 GET 结果为准。
 - 验收：关系 API 已由单元、HTTP、真实 MySQL 集成和端到端测试覆盖（有向、幂等、自关注、目标不存在、未登录、非法 ID、跨账号隔离）；关注按钮、关注流与关注标签页已通过 Chromium 夹具与隔离 Compose 真实浏览器验收；MySQL 集成和端到端测试验证多账号筛选、同一时间边界不越界、取关后不可见和游标不能混用。
 
-## 8. 事件、Worker 与通知（M4 进行中）
+## 8. 事件、Worker 与通知（M4 已完成）
 
 业务目标：互动成功后可靠产生作者提醒；服务故障后可以补处理。
 
@@ -122,11 +122,11 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - 消费者（第三步已实现，internal/mq/consumer.go + internal/notification）：prefetch 10，手动确认；消息还原成 outbox.Event 后交给 notification.Service.HandleEvent。写入用 INSERT … SELECT … FROM videos：视频已删时插入 0 行，算处理完；1062（已有这条通知）算处理完；1452（用户不存在）算无效事件。处理完、数据库提交后才 ACK；无效事件（类型未知、内容解析不了、缺 ID 或时间、自己给自己）拒绝且不重新入队，进死信队列；其他错误（数据库不可用）把消息拿在手里原地退避重试（1、2、4…最长 30 秒），不退回队列，因为退回一次就计一次投递。停止时不应答，消息随连接关闭回到队列。实测 RabbitMQ 4.2：没确认就断开连接、带重新入队的拒绝都计一次投递，最多投递 6 次后以 delivery_limit 进死信，用来挡住让进程反复崩溃的消息。
 - RabbitMQ（发布端第二步、消费端第三步已实现，internal/mq）：topic 交换机 gostream.events，routing key 即事件类型；仲裁队列 gostream.notifications 绑定 like.created、comment.created，x-delivery-limit 为 5，超过或被拒绝的消息经 fanout 交换机 gostream.events.dead 进 gostream.notifications.dead。发布用持久消息，message_id 为事件 ID，开启 publisher confirms 并以 mandatory 发布（没有队列接收会被退回，按未确认处理）；出错后关闭通道，下次重新连接。消息投递按可能重复处理，不宣称恰好一次。
 - 业务事务提交但发布失败：outbox 保留待发；发布成功但标记失败：允许重发，由消费者去重。
-- Worker（第二、三步已实现）：cmd/worker 只读取 GOSTREAM_DSN、GOSTREAM_AMQP_URL；投递员和消费者是同一进程里的两个 goroutine；启动时连不上 MySQL 直接报错退出（Compose 会重启它），运行中 MySQL 或 RabbitMQ 不可用时退避重试、不退出；SIGTERM 或 Ctrl+C 取消 context，未标记的事件随事务回滚、未确认的消息回到队列，两个任务都停下后进程以退出码 0 结束。main 把 notification.ErrInvalidEvent 翻译成 mq.ErrReject，业务包不依赖 RabbitMQ。
-- 接口（第四步已实现，都要登录）：GET /notifications?limit=&cursor=（id 倒序，游标是上一页最后一条的 id，limit 默认 20、最大 50）、GET /notifications/unread-count、PUT /notifications/:id/read（标记已读是幂等的“设成已读”，所以和点赞、关注一样用 PUT，不用最初拟定的 PATCH）、PUT /notifications/read?up_to=（全部已读只到页面上最新那条）。未读数靠 009 的 (recipient_id, read_at) 覆盖索引；前端每 60 秒查一次未读数。实时流 GET /notifications/stream 在第五步。
+- Worker（第二、三步已实现，第五步加上提示）：cmd/worker 读取 GOSTREAM_DSN、GOSTREAM_AMQP_URL，Redis（GOSTREAM_REDIS_ADDR、GOSTREAM_REDIS_PASSWORD）可选，写好通知后经 Redis 发布提示，发送失败只记日志；投递员和消费者是同一进程里的两个 goroutine；启动时连不上 MySQL 直接报错退出（Compose 会重启它），运行中 MySQL 或 RabbitMQ 不可用时退避重试、不退出；SIGTERM 或 Ctrl+C 取消 context，未标记的事件随事务回滚、未确认的消息回到队列，两个任务都停下后进程以退出码 0 结束。main 把 notification.ErrInvalidEvent 翻译成 mq.ErrReject，业务包不依赖 RabbitMQ。
+- 接口（第四步已实现，都要登录）：GET /notifications?limit=&cursor=（id 倒序，游标是上一页最后一条的 id，limit 默认 20、最大 50）、GET /notifications/unread-count、PUT /notifications/:id/read（标记已读是幂等的“设成已读”，所以和点赞、关注一样用 PUT，不用最初拟定的 PATCH）、PUT /notifications/read?up_to=（全部已读只到页面上最新那条）。未读数靠 009 的 (recipient_id, read_at) 覆盖索引；前端原先每 60 秒查一次未读数，第五步起改为收到推送提示才查，推送断开时才轮询。
 - 通知只给接收者读取（第四步已实现）：接收者只取自 JWT，每条 SQL 都带 recipient_id；别人的通知 ID 和不存在的 ID 一样返回 404，不暴露哪些 ID 存在。SSE 通道同样不能信任客户端传来的 recipient_id。
-- SSE 鉴权在浏览器客户端实现阶段选定：可用带 Authorization 的 fetch 读取流；不把长期 JWT 放在 URL 中。
-- SSE 是提示通道，持久化通知是事实；重连时按位置补读，避免把推送成功当成用户已读。
+- 实时流（第五步已实现）：GET /notifications/stream 要登录，浏览器用带 Authorization 的 fetch 读取（EventSource 不能带请求头，不把长期 JWT 放进 URL）。worker 写好通知后往 Redis 频道 gostream:notifications:v1 发布 {"recipient_id":N}；每个 API 进程订阅这个频道，交给内存里的 Hub，Hub 按用户找到连接，往每条连接容量为 1 的 channel 里不等待地放提示，满了就合并。每人最多 5 条连接（429），关闭期间 503，没有 Redis 时不注册路由（404，前端只轮询）。连接每 25 秒写一行心跳并复查会话，最多活到 access token 过期；每次写设 10 秒写超时；服务关闭时 RegisterOnShutdown 先关 Hub，Shutdown 不必干等长连接。
+- SSE 是提示通道，持久化通知是事实：提示里没有通知内容，页面收到后重新查未读数，所以提示可以丢。发布订阅不保存消息，API 重新订阅成功后给所有连接补发一个提示，页面每次连上先查一次；推送成功不等于已读。
 - 消息处理不直接依赖用户当前是否在线；自己给自己互动在写事件时就已排除（第一步），消费端按事件 ID 去重。
 
 ## 9. 工程基础与依赖故障策略（目标）
@@ -137,7 +137,7 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 | Redis | 读缓存、限流、短期会话 | Feed 缓存可受控回源；分片会话不能假定丢失后仍可续传；限流明确失败策略 |
 | RabbitMQ | 异步事件传输 | 有 outbox 时交互写入仍可提交，事件延迟，恢复后补发 |
 | 本地文件系统 | 视频/封面/分片 | 上传失败不能发布空地址；回收必须先判断归属与生命周期 |
-| SSE | 在线通知提示 | 断线重连、补读；不回滚已经完成的互动 |
+| SSE | 在线通知提示 | 页面退避重连、断开时退回轮询，连上时查一次未读数；Redis 中断时提示丢失，通知本身不受影响，也不回滚已经完成的互动 |
 
 存活检查拟定 /healthz：进程可处理请求；就绪检查拟定 /readyz：关键依赖可服务。
 Redis/MQ 是否导致不就绪取决于接口的降级策略，不能把所有可选依赖一概设为强依赖。

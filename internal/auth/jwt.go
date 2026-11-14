@@ -34,6 +34,15 @@ func GenerateToken(userID uint64, sessionID string, secret []byte) (string, erro
 
 // 验证 token，返回用户 ID 和会话 ID
 func ParseToken(tokenString string, secret []byte) (uint64, string, error) {
+	userID, claims, err := parseClaims(tokenString, secret)
+	if err != nil {
+		return 0, "", err
+	}
+	return userID, claims.SessionID, nil
+}
+
+// parseClaims 验证 token，返回用户 ID 和 token 里的全部内容：中间件还要用到过期时间。
+func parseClaims(tokenString string, secret []byte) (uint64, *Claims, error) {
 	claims := &Claims{}
 	//解析内容，并验证签名和相关声明
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
@@ -42,14 +51,14 @@ func ParseToken(tokenString string, secret []byte) (uint64, string, error) {
 		jwt.WithValidMethods([]string{"HS256"}), //只接受我们签发时使用的 HS256 算法
 		jwt.WithExpirationRequired())
 	if err != nil {
-		return 0, "", err
+		return 0, nil, err
 	}
 	if !token.Valid {
-		return 0, "", errors.New("无效的 token")
+		return 0, nil, errors.New("无效的 token")
 	}
 	userID, err := strconv.ParseUint(claims.Subject, 10, 64) //将 Subject 中的用户 ID 字符串转换回 uint64
 	if err != nil || userID == 0 {
-		return 0, "", errors.New("token 中的用户 ID 无效")
+		return 0, nil, errors.New("token 中的用户 ID 无效")
 	}
-	return userID, claims.SessionID, nil
+	return userID, claims, nil
 }

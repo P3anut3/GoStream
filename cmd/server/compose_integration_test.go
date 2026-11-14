@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -249,7 +251,34 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	if err := json.Unmarshal(jsonRequest(apiBase, "POST", "/login", "", fanCredentials, 200, false), &fanLogin); err != nil || fanLogin.Token == "" {
 		t.Fatal("Compose second login failed")
 	}
+	// The author keeps a notification stream open, as the page does: the worker's signal for the
+	// fan's like must arrive on it within seconds, long before the page's 60-second poll.
+	hints, _ := notificationHints(ctx, t, apiBase, login.Token)
 	request(apiBase, "PUT", fmt.Sprintf("/videos/%d/like", published.ID), fanLogin.Token, nil, "", 204, false)
+	select {
+	case <-hints:
+		t.Log("the fan's like reached the author's notification stream through the worker and Redis")
+	case <-time.After(20 * time.Second):
+		t.Fatal("the author's notification stream must hear about the fan's like")
+	}
+	// A stream is authenticated only when it opens, so each heartbeat checks its session again: once
+	// the session is deleted (a logout elsewhere, a stolen refresh token), the stream ends within 25 s.
+	var fanAgain struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(jsonRequest(apiBase, "POST", "/login", "", fanCredentials, 200, false), &fanAgain); err != nil || fanAgain.Token == "" {
+		t.Fatal("Compose second fan login failed")
+	}
+	_, fanStreamEnded := notificationHints(ctx, t, apiBase, fanAgain.Token)
+	if redis("DEL gostream:auth:v1:session:"+tokenSession(t, fanAgain.Token)) != "1" {
+		t.Fatal("the fan's second session must be in Redis")
+	}
+	select {
+	case <-fanStreamEnded:
+		t.Log("deleting a session ended its notification stream at the next heartbeat")
+	case <-time.After(40 * time.Second):
+		t.Fatal("a stream whose session is deleted must end at its next heartbeat")
+	}
 	// mysqlValue runs one query as the application user inside the MySQL container.
 	mysqlValue := func(query string) string {
 		t.Helper()
@@ -383,4 +412,55 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 		t.Fatalf("after recreation the author must read both notifications as unread, got %v and count %d", unread, count)
 	}
 	t.Log("after down/up: account/JWT, video record, uploaded file, Redis value, RabbitMQ message and notification retained; the waiting comment became a notification")
+}
+
+// notificationHints opens a notification stream with the token, as the page does. The first
+// channel gets a value for every hint on the stream, the second closes when the stream ends; the
+// stream is closed when the test ends.
+func notificationHints(ctx context.Context, t *testing.T, base, token string) (<-chan struct{}, <-chan struct{}) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/notifications/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := (&http.Client{}).Do(request) // no timeout: the response never ends by itself
+	if err != nil {
+		t.Fatal("cannot open the notification stream")
+	}
+	t.Cleanup(func() { response.Body.Close() })
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("the notification stream answered %d %q", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+	hints, ended := make(chan struct{}, 16), make(chan struct{})
+	go func() {
+		defer close(ended)
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			if scanner.Text() == "event: notification" {
+				select {
+				case hints <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	return hints, ended
+}
+
+// tokenSession reads the session ID from an access token, without checking the signature.
+func tokenSession(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatal("malformed access token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims struct {
+		SessionID string `json:"sid"`
+	}
+	if err != nil || json.Unmarshal(payload, &claims) != nil || claims.SessionID == "" {
+		t.Fatal("the access token carries no session")
+	}
+	return claims.SessionID
 }

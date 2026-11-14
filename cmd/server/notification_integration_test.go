@@ -71,7 +71,7 @@ func TestNotificationHTTPMySQLIntegration(t *testing.T) {
 	}
 	db := database.WrapSQL(pool)
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
-	server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), nil, false))
+	server := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), newTestStorage(t), nil, false, nil))
 	defer server.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	do := func(method, path, token string, payload any) (int, http.Header, []byte) {

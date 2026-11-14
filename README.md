@@ -26,9 +26,10 @@
 - 事件发件箱（M4 第一步）：点赞和评论成功时，在同一个 MySQL 事务里往 `outbox_events` 写一条待发送事件（`like.created`、`comment.created`，只存 ID）；重复点赞、给自己的视频点赞或评论都不写。事件先存在发件箱里，再由投递员发到 RabbitMQ（见下一条）。
 - 投递员 worker（M4 第二步）：独立进程 `cmd/worker` 每秒用 `FOR UPDATE SKIP LOCKED` 从发件箱领一批待发送事件，发到 RabbitMQ 的 topic 交换机 `gostream.events`（routing key 是事件类型）；RabbitMQ 确认收到、且没有因为无队列接收而退回时，才填上 `published_at`。RabbitMQ 不可用时事件留在发件箱，退避重试后自动补发；每小时删除发出满 7 天的事件。事件发到通知队列 `gostream.notifications`，再由消费者写成通知（见下一条）。
 - 通知消费者（M4 第三步）：worker 里的第二个任务从 `gostream.notifications` 取消息，把点赞、评论事件写成视频作者的通知（`notifications` 表，008 迁移），数据库提交后才确认（ACK）。同一事件只留一条通知（唯一键去重），视频已经删除的事件不写；事件本身有问题的消息直接进死信队列，数据库暂时不可用时原地等待、重试同一条，不退回队列。作者在通知页查看（见下一条）。
-- 通知列表与已读（M4 第四步）：侧栏“通知”显示未读数（登录后每 60 秒查一次），通知页从新到旧列出谁赞了、评论了你的哪个视频（评论被删除时显示“评论已删除”），按游标加载更多；点一条通知会标记已读并打开视频，“全部已读”只标页面上已经显示的通知。`GET /notifications`、`GET /notifications/unread-count`、`PUT /notifications/:id/read`、`PUT /notifications/read?up_to=` 都要登录，每个人只能看到、改动自己的通知。
+- 通知列表与已读（M4 第四步）：侧栏“通知”显示未读数（有新通知时由服务端推送，见下一条），通知页从新到旧列出谁赞了、评论了你的哪个视频（评论被删除时显示“评论已删除”），按游标加载更多；点一条通知会标记已读并打开视频，“全部已读”只标页面上已经显示的通知。`GET /notifications`、`GET /notifications/unread-count`、`PUT /notifications/:id/read`、`PUT /notifications/read?up_to=` 都要登录，每个人只能看到、改动自己的通知。
+- 实时提醒（M4 第五步）：登录后页面保持一条推送连接 `GET /notifications/stream`（SSE，用 fetch 带上 Authorization 读取）。worker 写好通知后经 Redis 发布订阅告诉 API，API 在这个作者的推送连接上写一行提示，页面收到后重新查未读数；通知页已经打开时提示“有新通知，点击刷新”。推送只是提示，通知以数据库为准；推送断开、页面在后台或 API 没有配置 Redis 时，页面退回每 60 秒查一次。
 
-当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；已通过 amqp091-go 接入 RabbitMQ（worker 进程发送发件箱事件，并消费通知队列写成通知）；API 仍为单进程模块化应用，另有独立的 worker 进程。
+当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话，以及 worker 发给 API 的新通知提示）；已通过 amqp091-go 接入 RabbitMQ（worker 进程发送发件箱事件，并消费通知队列写成通知）；API 仍为单进程模块化应用，另有独立的 worker 进程。
 
 ## Compose 快速启动
 
@@ -335,7 +336,7 @@ try {
 | `internal/httpx/http.go` | 完整请求体限制、multipart 临时文件清理和公开媒体访问 |
 | `internal/auth/jwt.go` | access token（JWT）签发和验证：带会话 ID，15 分钟有效 |
 | `internal/auth/session.go` | 登录会话：Redis 与进程内存两种存储，refresh token 轮换、重复使用检测和删除 |
-| `internal/auth/middleware.go` | Bearer token 鉴权中间件：验证签名后确认会话仍在 |
+| `internal/auth/middleware.go` | Bearer token 鉴权中间件：验证签名后确认会话仍在，把用户 ID、会话 ID 和 token 过期时间放进上下文 |
 | `internal/auth/*_test.go`、`internal/user/*_test.go` | 基础单元测试 |
 | `internal/video/handler.go`、`model.go` | 视频元数据接口和模型 |
 | `internal/video/delete_integration_test.go` | 连接 MySQL 的删除权限集成测试 |
@@ -347,8 +348,8 @@ try {
 | `internal/ratelimit/` | 固定窗口限流：Redis 计数、单机计数、Redis 故障时的降级包装和 Gin 中间件 |
 | `internal/outbox/` | 事件发件箱：事件类型和内容（`events.go`），在调用方的事务里写一行待发送事件（`outbox.go`），投递员领取、发送、标记和清理（`relay.go`） |
 | `internal/mq/` | RabbitMQ：声明交换机、通知队列和死信队列（`topology.go`），带发布确认和 mandatory 的发布器，断线后重连（`publisher.go`），手动确认、拒绝进死信、原地重试的消费者（`consumer.go`） |
-| `internal/notification/` | 通知：事件转换成通知、列表条目和分页结构（`notification.go`），读写 `notifications` 表并翻译数据库错误（`repository.go`），处理事件、分页和已读（`service.go`），列表、未读数、已读接口（`handler.go`） |
-| `cmd/worker/` | 后台进程：读取 worker 配置（`internal/config/worker.go`），同时运行发件箱投递员和通知消费者，收到 SIGTERM 后退出 |
+| `internal/notification/` | 通知：事件转换成通知、列表条目和分页结构（`notification.go`），读写 `notifications` 表并翻译数据库错误（`repository.go`），处理事件、分页和已读（`service.go`），列表、未读数、已读接口（`handler.go`），按用户登记推送连接、提示合并、关闭时结束所有连接的 Hub（`hub.go`），SSE 推送连接（`stream.go`），经 Redis 发布订阅传“有新通知”的提示（`signal.go`） |
+| `cmd/worker/` | 后台进程：读取 worker 配置（`internal/config/worker.go`），同时运行发件箱投递员和通知消费者，写好通知后经 Redis 提示 API（可选），收到 SIGTERM 后退出 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
 | `internal/httpx/web.go` | 只提供构建产物，未知 API 保持 404 |
@@ -359,7 +360,7 @@ try {
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱（点赞、评论与事件在同一个事务里提交）、第二步投递员（`cmd/worker` 把发件箱里的事件发到 RabbitMQ）、第三步通知消费者（把通知队列里的事件写成作者的通知）和第四步通知列表与已读（接口、侧栏未读数和通知页）已完成；接下来是 SSE 实时提醒（第五步）。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 已完成：第一步事件发件箱（点赞、评论与事件在同一个事务里提交）、第二步投递员（`cmd/worker` 把发件箱里的事件发到 RabbitMQ）、第三步通知消费者（把通知队列里的事件写成作者的通知）、第四步通知列表与已读（接口、侧栏未读数和通知页）和第五步 SSE 实时提醒（worker 经 Redis 提示 API，页面用推送代替轮询）。下一阶段是 M5 上传增强与恢复能力（分片上传、续传）。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -617,6 +618,38 @@ worker 里和投递员并排运行的第二个任务：从 `gostream.notificatio
 - 未读数：`SELECT COUNT(*) … WHERE recipient_id = ? AND read_at IS NULL`。`scripts/migrations/009_notifications_unread_index.sql` 加了 `(recipient_id, read_at)` 索引；测试插入 600 行、`ANALYZE TABLE` 后 EXPLAIN 为 `type=ref key=idx_notifications_unread Extra=Using where; Using index`（只读索引，不回表）。去掉这个索引时，MySQL 改用唯一键 `uk_notifications_recipient_event`，`Extra` 只剩 `Using where`，要逐行回表看 `read_at`。
 - 前端：侧栏“通知”带未读数（0 不显示，超过 99 显示 99+）；登录、恢复登录时查一次，之后每 60 秒查一次，标记已读后立即刷新，查询失败时保留原来的数字；换账号时丢弃旧账号还没返回的结果。通知页 `/notifications` 需要登录，未读的高亮显示，有“刷新通知”“全部已读”“加载更多”；点一条先标记已读再打开视频，标记失败也照样打开。用户名、标题和评论内容都按文本显示，不会被当成 HTML。手机宽度下侧栏导航排成两行（6 个入口放在一行会横向溢出）。开发服务器的代理也加上了 `/notifications`。
 
-已知限制：未读数靠 60 秒轮询，最多晚 1 分钟，第五步改成服务端推送；不能删除通知，也没有免打扰设置；只有点赞和评论两种通知。
+已知限制：未读数原先靠 60 秒轮询，第五步起改为服务端推送（见下一节）；不能删除通知，也没有免打扰设置；只有点赞和评论两种通知。
 
 默认测试覆盖：Service 的默认和最大条数、多查一条算 `has_more`、游标从本页最后一条开始、坏的 limit 和游标不进数据库、空列表是 `[]`；Handler 的 JSON 字段和顺序、缓存头、400/404/500、数据库错误不外泄、上下文里没有用户时一律 500 且不碰数据库、查询参数里的用户 ID 被忽略；Repository 用假驱动检查四条 SQL、参数顺序、NULL 和已读标记的读取、已读和“不是自己的”两种零行情况。`TestNotificationListMySQLIntegration`（MySQL）检查翻页和字段、删除评论后内容为 null、每个人只看到和数到自己的、重复标记保留第一次读的时间、别人的和不存在的都是未找到、全部已读停在 up_to 且不碰别人的通知（up_to 越过别人的通知也一样），以及 EXPLAIN；`TestNotificationMySQLIntegration` 同时检查 `schema.sql` 与 008、009 建出的表完全一致。`TestNotificationHTTPMySQLIntegration` 经真实路由走完：粉丝点赞、评论、取消再点赞，把发件箱事件交给通知服务（代替 worker），作者翻页、计数、标记，粉丝看不到也改不了作者的通知。路由测试检查四个接口未登录时 401、两个 PUT 计入写操作额度。前端单元测试覆盖轮询、失败保留计数、换账号丢弃旧结果、游标续读和去重、标记一条和全部已读；夹具浏览器测试覆盖登录后回到通知页、未读数、转义显示、加载更多、点开标记已读、全部已读停在已加载的最新一条、刷新后新通知仍是未读；真实浏览器测试（Compose）让第二个账号点赞、评论后，作者在通知页收到两条通知、点开一条、全部已读。变异测试改错 45 处（34 处单元测试、11 处需要真实 MySQL），全部被抓住。
+
+### 实时提醒（M4 第五步）
+
+`GET /notifications/stream` 要登录，返回一个不结束的响应（`Content-Type: text/event-stream`，带 `Cache-Control: private, no-store`、`Vary: Authorization` 和 `X-Accel-Buffering: no`）：
+
+```text
+: connected
+
+event: notification
+data: {}
+
+: ping
+```
+
+冒号开头的行是注释，浏览器会跳过：连上时先写一行，让页面马上拿到响应头；之后每 25 秒写一行作为心跳。有新通知时写一条 `notification` 事件，里面没有通知内容，页面收到后自己去查未读数。
+
+| 情况 | 结果 |
+| --- | --- |
+| 没有登录、token 失效或会话已删除 | 401（鉴权中间件） |
+| 这个用户已经有 5 条推送连接 | 429 |
+| 服务正在关闭 | 503 |
+| API 没有配置 Redis | 404：不注册这个路由，页面只轮询 |
+
+- 提示怎么到达：worker 把通知写进数据库之后，往 Redis 频道 `gostream:notifications:v1` 发布 `{"recipient_id":N}`；发送失败只记日志、照常确认消息，因为通知已经存好了。每个 API 进程订阅这个频道，把提示交给内存里的 Hub；Hub 按用户 ID 找到这个用户的推送连接，往每条连接容量为 1 的 channel 里放一个提示，放的时候不等待：channel 已满说明上一个提示还没处理完，这次直接合并掉。所以一条很慢的连接拖不住转发提示的 goroutine，短时间来很多赞也只会让页面多查一两次。
+- 提示丢了怎么办：发布订阅不保存消息，API 没订阅上时发的提示会丢。API 每次（重新）订阅成功，都给所有连接补发一个提示；页面每次连上也先查一次未读数；推送连接最多活到 access token 过期（15 分钟），所以漏掉的提示最晚在下一次重连时补上。
+- 长连接的鉴权：推送连接只在建立时经过中间件，所以中间件把会话 ID 和 token 的过期时间也放进上下文。token 过期时服务端结束连接，页面用新 token 重连；每次心跳复查一次会话，会话被删除（在别处退出、检测到 refresh token 被盗用）后最多 25 秒连接就结束；Redis 查不了时继续，和中间件的降级一样。
+- 写超时与关闭：每次写之前用 `http.ResponseController` 设 10 秒写超时，写完立刻 Flush。不能给 `http.Server` 设 `WriteTimeout`，那会把所有长连接掐断。`Shutdown` 只等连接变成空闲，推送连接永远不会空闲，所以用 `RegisterOnShutdown(hub.Close)` 在关闭开始时结束所有推送连接，`Shutdown` 才能很快完成。
+- 前端（`src/api/stream.ts`、`src/stores/notifications.ts`）：浏览器自带的 EventSource 不能带 Authorization 头，只能把 token 放进 URL，所以用 fetch 读响应体，自己按空行切出事件。推送连着时不轮询；断开后退回 60 秒轮询，再等 1、2、4…最多 30 秒（乘 0.5～1 的随机数，避免服务重启时所有页面同时重连）重连，连上持续 30 秒后重新从 1 秒算；401 时换一次 token 再连，换来的 token 还是 401 就按退避时间重试；404 说明服务端没有推送，这次登录不再尝试；60 秒什么都没收到（心跳也算）就主动断开重连。页面切到后台时断开推送、改为轮询，回到前台马上重连：HTTP/1.1 下浏览器对一个站点最多开 6 个连接，每个标签页都占一条推送会把其他请求堵住。收到提示后未读数变多、而通知页已经加载过列表时，页面顶部提示“有新通知，点击刷新”，不自动刷新列表，免得正在看的内容跳走。侧栏“通知”的 `data-live` 属性标出推送是否连着。
+
+已知限制：只有一个 Redis 频道，每个 API 进程都会收到所有用户的提示，再自己筛选；没有让多个标签页共用一条连接，也没有用 HTTP/2；Redis 长时间不可用时，已经连着的页面要到下一次重连（最多 15 分钟）才看到新通知。
+
+默认测试覆盖（不需要真实 Redis，用 miniredis）：Hub 只提示对应的用户、多个提示合并成一个、每人最多 5 条、关闭后拒绝新连接、用户没有连接后从 map 里删掉、并发使用（`-race`）；Stream handler 用 `testing/synctest` 在虚拟时间里检查响应头、开头的注释、提示、25 秒心跳和会话复查、Redis 故障时继续、token 到期、浏览器断开、Hub 关闭、写失败立即结束、每次写的 10 秒期限和 Flush，以及 429、503、500；Redis 部分检查提示只到接收者、格式不对的消息被丢弃、空闲时间超过客户端读超时以后仍能收到、Redis 重启后重新订阅并补发；中间件把会话 ID 和过期时间放进上下文；worker 写好通知后才发提示、发送失败不影响确认、没配置 Redis 时不发。真实 HTTP 服务器测试收到发给自己的提示、收不到别人的，有推送连接时 `Shutdown` 也立刻完成。`TestWorkerTurnsEventsIntoNotifications`（MySQL + RabbitMQ + miniredis）检查点赞和评论各给作者发一个提示、坏事件不发。前端单元测试覆盖事件解析（三种换行、任意位置切开）、连接结果、停止和恢复轮询、退避和随机数、连接稳定后重置、401 只换一次 token、404 不再尝试、退出登录、60 秒静默、页面隐藏、提示合并和“有新通知”；夹具浏览器测试检查推送提示马上更新未读数并出现刷新提示。Compose 测试检查粉丝点赞后作者的推送连接收到提示、删除一个会话后它的推送连接在下一次心跳时结束；真实浏览器测试中作者的页面不刷新，第二个账号点赞、评论后 20 秒内未读数变成 2。变异测试：Go 改错 57 处，56 处被单元测试抓住，剩下的“不把会话存储传给 Stream handler”只有真实的 25 秒心跳才看得出来，由 Compose 测试里删除会话那一项覆盖（没有用改坏的镜像实际跑过）；前端改错 32 处全部被抓住；另外去掉 Hub 的锁会被 `-race` 抓住。

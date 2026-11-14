@@ -42,7 +42,7 @@ func TestRouterRateLimits(t *testing.T) {
 		redis *redis.Client
 	}{{name: "redis", redis: redisClient}, {name: "in_process", redis: nil}} {
 		t.Run(tc.name, func(t *testing.T) {
-			router := newRouter(nil, secret, newTestFeedCursor(t), newTestStorage(t), tc.redis, false)
+			router := newRouter(nil, secret, newTestFeedCursor(t), newTestStorage(t), tc.redis, false, nil)
 			do := func(method, path, token string) *httptest.ResponseRecorder {
 				t.Helper()
 				request := httptest.NewRequest(method, path, strings.NewReader("not json"))
@@ -119,7 +119,7 @@ func TestRouterRateLimitsWhileRedisIsDown(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	redisClient := newRedisClient(redisServer.Addr(), "")
 	defer redisClient.Close()
-	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), redisClient, false)
+	router := newRouter(nil, []byte("test-only-jwt-secret-at-least-32-bytes"), newTestFeedCursor(t), newTestStorage(t), redisClient, false, nil)
 	redisServer.Close()
 	for i := 1; i <= 11; i++ {
 		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("not json"))

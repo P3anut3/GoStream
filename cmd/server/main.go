@@ -54,10 +54,11 @@ func main() {
 	if redisClient != nil {
 		defer redisClient.Close()
 	}
-	router := newRouter(db, secret, feedCursor, cfg.Storage, redisClient, cfg.Auth.SecureCookie == "true")
-	server := &http.Server{Addr: cfg.HTTP.Addr, Handler: router, ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	hub := newHub(ctx, redisClient)
+	router := newRouter(db, secret, feedCursor, cfg.Storage, redisClient, cfg.Auth.SecureCookie == "true", hub)
+	server := newServer(cfg.HTTP.Addr, router, hub)
 	failed := make(chan error, 1)
 	go func() { failed <- server.ListenAndServe() }()
 	log.Printf("GoStream Gin HTTP 服务监听 %s", cfg.HTTP.Addr)
@@ -76,11 +77,32 @@ func main() {
 	}
 }
 
-// openRedis 创建可选的 Redis 客户端（缓存、限流计数和登录会话）：未配置时返回 nil，限流和会话改存本进程内存；
-// 连不上只记录日志，之后各功能分别降级：缓存直接读 MySQL，限流单机计数，登录和刷新返回 503。
+// newHub 创建实时提醒的 hub，并开始从 Redis 接收 worker 发来的"有新通知"提示，直到 ctx 结束。
+// 没有 Redis 就收不到 worker 的提示，返回 nil：不开推送，页面继续每 60 秒查一次未读数。
+func newHub(ctx context.Context, redisClient *redis.Client) *notification.Hub {
+	if redisClient == nil {
+		return nil
+	}
+	hub := notification.NewHub()
+	go (&notification.RedisSignals{Client: redisClient}).Listen(ctx, hub)
+	return hub
+}
+
+// newServer 创建 HTTP 服务。Shutdown 只等连接空闲，而推送连接永远不会空闲，
+// 所以关闭时先关掉 hub：每条推送连接看到槽被关闭就结束，Shutdown 才能很快完成。
+func newServer(addr string, handler http.Handler, hub *notification.Hub) *http.Server {
+	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	if hub != nil {
+		server.RegisterOnShutdown(hub.Close)
+	}
+	return server
+}
+
+// openRedis 创建可选的 Redis 客户端（缓存、限流计数、登录会话和新通知提示）：未配置时返回 nil，限流和会话改存本进程内存；
+// 连不上只记录日志，之后各功能分别降级：缓存直接读 MySQL，限流单机计数，登录和刷新返回 503，新通知等 Redis 恢复后补发提示。
 func openRedis(cfg config.RedisConfig) *redis.Client {
 	if cfg.Addr == "" {
-		log.Printf("未配置 Redis：缓存关闭，限流计数和登录会话只存在本进程内存里（API 重启后需要重新登录）")
+		log.Printf("未配置 Redis：缓存关闭，限流计数和登录会话只存在本进程内存里（API 重启后需要重新登录），新通知不实时推送")
 		return nil
 	}
 	client := newRedisClient(cfg.Addr, cfg.Password)
@@ -89,7 +111,7 @@ func openRedis(cfg config.RedisConfig) *redis.Client {
 	if err := client.Ping(ctx).Err(); err != nil {
 		log.Printf("Redis 暂不可用：缓存直接读 MySQL，限流改为单机计数，登录和刷新会返回 503: %v", err)
 	} else {
-		log.Printf("已连接 Redis %s（缓存、限流计数和登录会话）", cfg.Addr)
+		log.Printf("已连接 Redis %s（缓存、限流计数、登录会话和新通知提示）", cfg.Addr)
 	}
 	return client
 }
@@ -109,7 +131,8 @@ func newRedisClient(addr, password string) *redis.Client {
 	})
 }
 
-func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client, secureCookie bool) *gin.Engine {
+// newRouter 注册所有路由。hub 为 nil（没有 Redis）时不注册推送连接，前端得到 404 后只轮询。
+func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage config.StorageConfig, redisClient *redis.Client, secureCookie bool, hub *notification.Hub) *gin.Engine {
 	router := gin.Default()
 	router.SetTrustedProxies(nil)
 	router.MaxMultipartMemory = 8 * 1024 * 1024
@@ -192,6 +215,10 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	router.DELETE("/users/:id/follow", jwt, writeLimit, followHandler.Unfollow)
 	router.GET("/notifications", jwt, notifications.List)
 	router.GET("/notifications/unread-count", jwt, notifications.UnreadCount)
+	if hub != nil {
+		// 推送连接一直不结束：有新通知时写一行提示，页面再来查未读数；心跳时复查会话。
+		router.GET("/notifications/stream", jwt, notification.NewStreamHandler(hub, sessions).Stream)
+	}
 	router.PUT("/notifications/read", jwt, writeLimit, notifications.MarkAllRead)
 	router.PUT("/notifications/:id/read", jwt, writeLimit, notifications.MarkRead)
 	httpx.RegisterWeb(router, "web/dist")

@@ -10,7 +10,8 @@ async function logout() {
   await session.logout(); session.notify('已退出登录')
 }
 watch(() => session.token, token => { if (!token && route.meta.auth) void router.replace('/') })
-// 登录、退出、换账号时重置通知：登录后开始定时查未读数。
+// 登录、退出、换账号时重置通知：登录后查未读数并连接推送，推送没连上时定时查。
+// data-live 标出推送是否连着，方便测试和排查。
 watch(() => session.user?.id, id => notifications.watchSession(!!id), { immediate: true })
 </script>
 
@@ -22,7 +23,7 @@ watch(() => session.user?.id, id => notifications.watchSession(!!id), { immediat
       <RouterLink id="nav-library" class="nav-item" exact-active-class="active" to="/"><span>▦</span>视频库<span class="arrow">↗</span></RouterLink>
       <RouterLink id="nav-following" class="nav-item" active-class="active" to="/following"><span>☆</span>关注</RouterLink>
       <RouterLink id="nav-mine" class="nav-item" active-class="active" to="/mine"><span>▷</span>我的视频</RouterLink>
-      <RouterLink id="nav-notifications" class="nav-item" active-class="active" to="/notifications"><span>✉︎</span>通知<span v-if="notifications.unread" class="nav-count" :aria-label="`${notifications.unread} 条未读通知`">{{ notifications.unread > 99 ? '99+' : notifications.unread }}</span></RouterLink>
+      <RouterLink id="nav-notifications" class="nav-item" active-class="active" to="/notifications" :data-live="notifications.live ? 'yes' : 'no'"><span>✉︎</span>通知<span v-if="notifications.unread" class="nav-count" :aria-label="`${notifications.unread} 条未读通知`">{{ notifications.unread > 99 ? '99+' : notifications.unread }}</span></RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/publish"><span>＋</span>发布视频</RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/account"><span>◎</span>当前用户</RouterLink>
     </nav>

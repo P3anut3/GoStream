@@ -90,9 +90,9 @@ func TestLatestFeedTimelineHTTPIntegration(t *testing.T) {
 	defer redisClient.Close()
 	secret := []byte("test-only-jwt-secret-at-least-32-bytes")
 	storage := newTestStorage(t)
-	cached := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false))
+	cached := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, redisClient, false, nil))
 	defer cached.Close()
-	direct := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, nil, false)) // MySQL only
+	direct := httptest.NewServer(newRouter(db, secret, newTestFeedCursor(t), storage, nil, false, nil)) // MySQL only
 	defer direct.Close()
 	client := &http.Client{Timeout: 5 * time.Second}
 	send := func(server *httptest.Server, method, path, token, contentType string, body io.Reader) (int, []byte) {

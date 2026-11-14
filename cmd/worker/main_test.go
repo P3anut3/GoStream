@@ -8,12 +8,15 @@ import (
 	"io"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/go-sql-driver/mysql"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/redis/go-redis/v9"
 	"gostream/internal/config"
 	"gostream/internal/database"
 	"gostream/internal/mq"
@@ -45,42 +48,133 @@ func (stubRepository) MarkAllRead(context.Context, uint64, uint64) error {
 	return errors.New("unexpected MarkAllRead")
 }
 
+// recordingSignals remembers whom it signaled, after the given steps, or fails like a Redis that
+// is down.
+type recordingSignals struct {
+	recipients []uint64
+	steps      *[]string
+	err        error
+}
+
+func (r *recordingSignals) Publish(_ context.Context, recipientID uint64) error {
+	r.recipients = append(r.recipients, recipientID)
+	if r.steps != nil {
+		*r.steps = append(*r.steps, "signal")
+	}
+	return r.err
+}
+
+// orderedRepository records when a notification is stored.
+type orderedRepository struct {
+	stubRepository
+	steps *[]string
+}
+
+func (r orderedRepository) Create(ctx context.Context, n notification.Notification) error {
+	*r.steps = append(*r.steps, "store")
+	return r.stubRepository.Create(ctx, n)
+}
+
 // TestHandleEvent: an invalid event is rejected into the dead-letter queue, a database error is
-// retried, and a stored notification is acknowledged.
+// retried, and a stored notification is acknowledged and signaled to its recipient; a signal
+// that cannot be sent changes nothing, since the notification is already stored.
 func TestHandleEvent(t *testing.T) {
+	writer := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(writer) })
 	valid := outbox.Event{ID: 1, Type: outbox.TypeLikeCreated, Payload: []byte(`{"actor_id":2,"author_id":3,"video_id":4}`), CreatedAt: time.Now()}
 	unknown := outbox.Event{ID: 1, Type: "video.deleted", Payload: []byte(`{}`), CreatedAt: time.Now()}
 	down := errors.New("database unavailable")
 	missingUser := fmt.Errorf("%w: user 2 does not exist", notification.ErrInvalidEvent)
 	for _, tc := range []struct {
-		name       string
-		event      outbox.Event
-		repoErr    error
-		wantErr    error
-		wantReject bool
+		name        string
+		event       outbox.Event
+		repoErr     error
+		signalErr   error
+		wantErr     error
+		wantReject  bool
+		wantSignals []uint64
 	}{
-		{name: "stored", event: valid},
+		{name: "stored", event: valid, wantSignals: []uint64{3}},
+		{name: "signal_failure_is_only_logged", event: valid, signalErr: errors.New("redis down"), wantSignals: []uint64{3}},
 		{name: "invalid_event_is_rejected", event: unknown, wantErr: notification.ErrInvalidEvent, wantReject: true},
 		{name: "missing_user_is_rejected", event: valid, repoErr: missingUser, wantErr: notification.ErrInvalidEvent, wantReject: true},
 		{name: "database_error_is_retried", event: valid, repoErr: down, wantErr: down},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := handleEvent(notification.NewService(stubRepository{err: tc.repoErr}))(context.Background(), tc.event)
+			signals := &recordingSignals{err: tc.signalErr}
+			err := handleEvent(notification.NewService(stubRepository{err: tc.repoErr}), signals)(context.Background(), tc.event)
 			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 				t.Fatalf("expected %v, got %v", tc.wantErr, err)
 			}
 			if errors.Is(err, mq.ErrReject) != tc.wantReject {
 				t.Fatalf("reject: got %v, want %v (%v)", errors.Is(err, mq.ErrReject), tc.wantReject, err)
 			}
+			if !slices.Equal(signals.recipients, tc.wantSignals) {
+				t.Fatalf("signaled %v, want %v", signals.recipients, tc.wantSignals)
+			}
 		})
+	}
+	// Without Redis nobody is signaled, and the event is stored all the same.
+	if err := handleEvent(notification.NewService(stubRepository{}), nil)(context.Background(), valid); err != nil {
+		t.Fatalf("without signals the event must still be stored, got %v", err)
+	}
+}
+
+// TestNewSignals: without Redis there is nothing to signal with, as a true nil interface; with
+// Redis the signals reach the channel the API listens to.
+func TestNewSignals(t *testing.T) {
+	writer := log.Writer()
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(writer) })
+	signals, done := newSignals(config.RedisConfig{})
+	done()
+	if signals != nil {
+		t.Fatalf("without Redis handleEvent must get a nil signaler, got %T", signals)
+	}
+	server := miniredis.RunT(t)
+	listener := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { listener.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	subscription := listener.Subscribe(ctx, notification.SignalChannel)
+	t.Cleanup(func() { subscription.Close() })
+	if _, err := subscription.Receive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	signals, done = newSignals(config.RedisConfig{Addr: server.Addr()})
+	defer done()
+	if signals == nil {
+		t.Fatal("with Redis there must be a signaler")
+	}
+	if err := signals.Publish(ctx, 9); err != nil {
+		t.Fatal(err)
+	}
+	message, err := subscription.ReceiveMessage(ctx)
+	if err != nil || message.Payload != `{"recipient_id":9}` {
+		t.Fatalf("the API's channel must get the signal for user 9, got %v, %v", message, err)
+	}
+}
+
+// TestHandleEventSignalsAfterStoring: a browser that hears the signal queries at once, so the
+// notification must already be stored.
+func TestHandleEventSignalsAfterStoring(t *testing.T) {
+	var steps []string
+	event := outbox.Event{ID: 1, Type: outbox.TypeCommentCreated, Payload: []byte(`{"actor_id":2,"author_id":3,"video_id":4,"comment_id":5}`), CreatedAt: time.Now()}
+	signals := &recordingSignals{steps: &steps}
+	if err := handleEvent(notification.NewService(orderedRepository{steps: &steps}), signals)(context.Background(), event); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(steps, []string{"store", "signal"}) || !slices.Equal(signals.recipients, []uint64{3}) {
+		t.Fatalf("got steps %v for recipients %v, want the comment stored and then its author signaled", steps, signals.recipients)
 	}
 }
 
 // TestWorkerTurnsEventsIntoNotifications runs the whole worker against a real MySQL and RabbitMQ:
 // while RabbitMQ cannot be reached the events stay in the outbox; once it can, they are sent and
-// marked, the like and the comment become notifications that carry the time of the event, the
-// event with a broken payload moves to the dead-letter queue, and canceling the context stops the
-// worker cleanly. GOSTREAM_TEST_MYSQL_DSN and GOSTREAM_TEST_AMQP_URL must point to disposable
+// marked, the like and the comment become notifications that carry the time of the event and are
+// signaled to the author through Redis (miniredis here), the event with a broken payload moves to
+// the dead-letter queue, and canceling the context stops the worker cleanly. GOSTREAM_TEST_MYSQL_DSN and GOSTREAM_TEST_AMQP_URL must point to disposable
 // servers; the test creates and drops its own database and empties the queues.
 func TestWorkerTurnsEventsIntoNotifications(t *testing.T) {
 	dsn, amqpURL := os.Getenv("GOSTREAM_TEST_MYSQL_DSN"), os.Getenv("GOSTREAM_TEST_AMQP_URL")
@@ -215,11 +309,33 @@ func TestWorkerTurnsEventsIntoNotifications(t *testing.T) {
 	}
 
 	// RabbitMQ back: everything is sent, the valid events become notifications and the broken one
-	// moves to the dead-letter queue.
-	stop, done = start(config.WorkerConfig{DSN: workerDSN, AMQPURL: amqpURL})
+	// moves to the dead-letter queue. With Redis configured, each stored notification is signaled
+	// to its recipient; the signals are awaited before stopping, since stopping cancels a send.
+	signalServer := miniredis.RunT(t)
+	listener := redis.NewClient(&redis.Options{Addr: signalServer.Addr()})
+	t.Cleanup(func() { listener.Close() })
+	subscription := listener.Subscribe(ctx, notification.SignalChannel)
+	t.Cleanup(func() { subscription.Close() })
+	if _, err := subscription.Receive(ctx); err != nil { // the confirmation: subscribed from here on
+		t.Fatal(err)
+	}
+	signals := subscription.Channel()
+	var signaled []string
+	drain := func() {
+		for {
+			select {
+			case message := <-signals:
+				signaled = append(signaled, message.Payload)
+			default:
+				return
+			}
+		}
+	}
+	stop, done = start(config.WorkerConfig{DSN: workerDSN, AMQPURL: amqpURL, Redis: config.RedisConfig{Addr: signalServer.Addr()}})
 	var dead amqp.Delivery
 	deadFound := false
-	for deadline := time.Now().Add(20 * time.Second); pending() > 0 || notifications() < 2 || !deadFound; time.Sleep(100 * time.Millisecond) {
+	for deadline := time.Now().Add(20 * time.Second); pending() > 0 || notifications() < 2 || !deadFound || len(signaled) < 2; time.Sleep(100 * time.Millisecond) {
+		drain()
 		if !deadFound {
 			message, ok, err := ch.Get(mq.DeadLetterQueue, true)
 			if err != nil {
@@ -228,10 +344,15 @@ func TestWorkerTurnsEventsIntoNotifications(t *testing.T) {
 			dead, deadFound = message, ok
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("events were not handled: %d pending, %d notifications, dead letter %v", pending(), notifications(), deadFound)
+			t.Fatalf("events were not handled: %d pending, %d notifications, dead letter %v, %d signals", pending(), notifications(), deadFound, len(signaled))
 		}
 	}
 	stopWithin(stop, done)
+	time.Sleep(200 * time.Millisecond)
+	drain()
+	if want := fmt.Sprintf(`{"recipient_id":%d}`, author); len(signaled) != 2 || signaled[0] != want || signaled[1] != want {
+		t.Fatalf("the like and the comment must each be signaled to the author once, and the broken event to nobody, got %v", signaled)
+	}
 	if dead.MessageId != fmt.Sprint(brokenID) {
 		t.Fatalf("the broken event %d must be dead-lettered, got %q", brokenID, dead.MessageId)
 	}

@@ -32,6 +32,8 @@ async function mockAPI(page: Page, override?: (route: Route, path: string, metho
     if (path === '/comments/1' && method === 'DELETE') { comments = []; return route.fulfill({ status: 204 }) }
     if (path === '/notifications/unread-count') return ok(route, { count: 0 })
     if (path === '/notifications') return ok(route, { notifications: [], next_cursor: '', has_more: false })
+    // By default the server has no push, as without Redis: the page tries once and keeps polling.
+    if (path === '/notifications/stream') return ok(route, { error: '404 page not found' }, 404)
     await route.continue()
   })
 }
@@ -328,4 +330,44 @@ test('notifications: unread count, escaped list, opening marks read, mark all st
   await page.getByRole('button', { name: '刷新通知' }).click()
   await expect(rows).toHaveCount(4)
   await expect(page.locator('.notification-item.unread')).toHaveCount(1)
+})
+
+test('notifications: a pushed hint updates the count at once and offers to refresh the list', async ({ page }) => {
+  const notification = (id: number) => ({ id, type: 'like.created', actor_id: 2, actor_name: 'bob', video_id: 1, video_title: '测试作品 1', comment_id: null, comment_content: null, created_at: '2026-11-14T10:00:00+08:00', read: false })
+  let items = [notification(1)]
+  let release!: () => void
+  const signaled = new Promise<void>(resolve => { release = resolve })
+  const streams: string[] = []
+  await mockAPI(page, async (route, path, method) => {
+    if (path === '/notifications/unread-count') { await ok(route, { count: items.filter(n => !n.read).length }); return true }
+    if (path === '/notifications' && method === 'GET') { await ok(route, { notifications: items, next_cursor: '', has_more: false }); return true }
+    if (path === '/notifications/stream') {
+      streams.push(route.request().headers().authorization)
+      // The first stream answers once the test sends the signal; the page reconnects after it ends,
+      // and that stream never answers, so no further hint can arrive.
+      if (streams.length === 1) {
+        await signaled
+        await route.fulfill({ status: 200, headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'private, no-store' }, body: ': connected\n\nevent: notification\ndata: {}\n\n' })
+      }
+      return true
+    }
+    return false
+  })
+  await page.goto('/')
+  await login(page)
+  await page.locator('#nav-notifications').click()
+  const rows = page.locator('.notification-item')
+  await expect(rows).toHaveCount(1)
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('1')
+  await expect.poll(() => streams).toEqual(['Bearer test-issued-token'])
+  // A like arrives: the signal on the open stream brings the new count long before the next poll,
+  // and the page offers to refresh instead of moving the list under the reader.
+  items = [notification(2), ...items]
+  release()
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('2', { timeout: 5000 })
+  await expect(page.locator('.notification-fresh')).toContainText('有新通知')
+  await expect(rows).toHaveCount(1)
+  await page.getByRole('button', { name: '点击刷新', exact: true }).click()
+  await expect(rows).toHaveCount(2)
+  await expect(page.locator('.notification-fresh')).toHaveCount(0)
 })

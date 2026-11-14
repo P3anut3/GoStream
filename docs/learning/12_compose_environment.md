@@ -8,6 +8,8 @@
 
 更新（2026-11-14，M4 第四步）：API 新增通知列表、未读数和已读接口，页面新增“通知”入口和通知页，服务数不变。gostream-dev 已经用户同意执行 009（只给 notifications 加 `idx_notifications_unread (recipient_id, read_at)` 索引，4 条通知不变），并同样只重建 api 和 worker；`/healthz`、`/readyz` 返回 200，不带凭证访问 `/notifications`、`/notifications/unread-count` 返回 401。
 
+更新（2026-11-14，M4 第五步）：worker 新增 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD`，并等 Redis 健康后启动（写好通知后经 Redis 发布订阅提示 API）；API 新增推送连接 `GET /notifications/stream`。服务数不变，没有数据库迁移。gostream-dev 同样只重建 api 和 worker；`/healthz`、`/readyz` 返回 200，不带凭证访问 `/notifications/stream` 返回 401，Redis 频道 `gostream:notifications:v1` 有 1 个订阅者（API），通知队列和死信队列都是 0。
+
 本机 `gostream-dev` 开发栈已启动，四服务均 healthy；首页返回 200，`/healthz` 和 `/readyz` 均返回 ok。使用全新的开发卷，没有导入原 Windows MySQL 数据。原停止状态的 redis 容器和原本机配置保留。
 
 ## 1. 这一轮解决什么问题
@@ -25,9 +27,10 @@ flowchart LR
     API -.->|redis:6379 缓存、限流、会话| R[Redis] --> RD[(redis_data)]
     W[Worker 投递员与消费者] -->|mysql:3306 领取事件、写通知| DB
     W -->|rabbitmq:5672 发布事件、消费通知| MQ[RabbitMQ] --> MD[(rabbitmq_data)]
+    W -.->|redis:6379 发布新通知提示| R
 ```
 
-M3 起 API 通过 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 连接 Redis，用于缓存、限流计数和登录会话（虚线表示运行中 Redis 故障时 API 仍可服务：读请求回源 MySQL，已登录的请求按签名放行，登录和刷新暂时返回 503）。M4 第二步起 worker 从 MySQL 领取发件箱事件、发到 RabbitMQ，第三步起再从通知队列取回事件、写成通知；API 本身不连接 RabbitMQ。
+M3 起 API 通过 `GOSTREAM_REDIS_ADDR`、`GOSTREAM_REDIS_PASSWORD` 连接 Redis，用于缓存、限流计数和登录会话（虚线表示运行中 Redis 故障时 API 仍可服务：读请求回源 MySQL，已登录的请求按签名放行，登录和刷新暂时返回 503）。M4 第二步起 worker 从 MySQL 领取发件箱事件、发到 RabbitMQ，第三步起再从通知队列取回事件、写成通知；API 本身不连接 RabbitMQ。第五步起 worker 也用同一组变量连接 Redis，写好通知后往频道 `gostream:notifications:v1` 发布提示，API 订阅这个频道，再推给浏览器的推送连接；Redis 故障时通知照常写入，页面在轮询或重连时看到。
 
 ## 2. 首次启动与日常使用
 
@@ -80,7 +83,7 @@ API 容器里的 `127.0.0.1` 是 API 容器自己，并不是 Windows，也不�
 
 MySQL 健康检查使用应用账号连接数据库，并确认 users 表可查询。API 的 `depends_on: mysql: condition: service_healthy` 等待这个条件满足后启动；API 自身使用 `/readyz` 做健康检查。Redis 通过带密码的 PING 检查，RabbitMQ 检查节点运行状态。
 
-API 启动前等待 MySQL 和 Redis 健康。Redis 只是缓存：运行中故障时 API 降级到 MySQL，`/readyz` 也不检查 Redis；RabbitMQ 不是 API 的依赖，不应阻止 API 启动；worker 才依赖它，等 MySQL 和 RabbitMQ 都健康后启动，worker 自己没有健康检查。`depends_on` 处理启动顺序；它不等于运行时自动修复，也不会因为容器变为 unhealthy 就自动重启它。`restart: unless-stopped` 处理进程退出后的重启。依据：[Compose 启动顺序](https://docs.docker.com/compose/how-tos/startup-order/)。
+API 启动前等待 MySQL 和 Redis 健康。Redis 只是缓存：运行中故障时 API 降级到 MySQL，`/readyz` 也不检查 Redis；RabbitMQ 不是 API 的依赖，不应阻止 API 启动；worker 才依赖它，等 MySQL、RabbitMQ 和 Redis（第五步起）都健康后启动，worker 自己没有健康检查。`depends_on` 处理启动顺序；它不等于运行时自动修复，也不会因为容器变为 unhealthy 就自动重启它。`restart: unless-stopped` 处理进程退出后的重启。依据：[Compose 启动顺序](https://docs.docker.com/compose/how-tos/startup-order/)。
 
 ## 5. 数据为什么能保留
 
@@ -118,6 +121,8 @@ M4 第三步（2026-11-14）把这部分改为检查通知：第二个账号点�
 
 M4 第四步（2026-11-14）再加上接口层面的检查：作者通过 `GET /notifications` 读到粉丝的点赞（未读），`GET /notifications/unread-count` 为 1；重建后能读到点赞和评论两条未读通知，未读数为 2。真实浏览器测试（`frontend/tests/e2e/live.spec.ts`）也加了通知：第二个账号点赞、评论后，作者在通知页收到两条通知（评论已被删除，显示“评论已删除”），点开一条变成已读并打开视频，“全部已读”后未读数消失。本轮 `TestComposeEnvironmentIntegration` 通过（约 59 秒）。
 
+M4 第五步（2026-11-14）再加两项推送检查：作者开着推送连接时，粉丝点赞后 20 秒内连接上出现 `event: notification`；粉丝另登录一次、打开推送连接，再直接删除 Redis 里这个会话的键，连接在下一次心跳（25 秒）时结束。真实浏览器测试中作者的页面不刷新、推送连着（`data-live="yes"`，不轮询），第二个账号点赞、评论后未读数变成 2。本轮带真实浏览器的 `TestComposeEnvironmentIntegration` 通过（约 85 秒，多出来的主要是等这一次心跳；本机记录，不是性能结论）。
+
 准备好四个本地镜像后可复现 Compose 测试：
 
 ```powershell
@@ -133,6 +138,6 @@ try {
 
 ## 7. 下一步与阅读检查
 
-Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成；M3 已接入 Redis；M4 第二步起 worker 向 RabbitMQ 发布事件，第三步起也消费通知队列、写成通知。
+Vue/TypeScript 迁移和基础 CI 配置已完成，见迁移记录；阶段提交、远端关联及 GitHub 首次 CI 运行也已于 2026-11-02 完成，M1 结束。M2 关注模块也已完成；M3 已接入 Redis；M4 第二步起 worker 向 RabbitMQ 发布事件，第三步起也消费通知队列、写成通知，第五步起经 Redis 提示 API，由 API 推给浏览器；M4 已完成。
 
 先尝试回答：API 为什么访问 mysql:3306，而你在 Windows 连接数据库却使用 127.0.0.1:13307？如果只删 API 容器，作品记录和视频文件分别靠什么保留？

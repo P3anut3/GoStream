@@ -32,6 +32,7 @@ async function readAll() {
         <button class="icon-button" aria-label="刷新通知" :disabled="notifications.loading" @click="notifications.load()">↻</button>
       </div>
     </div>
+    <p v-if="notifications.stale" class="notification-fresh" role="status">有新通知 <button class="text-button" :disabled="notifications.loading" @click="notifications.load()">点击刷新</button></p>
     <p v-if="notifications.error" class="form-message" role="alert">{{ notifications.error }} <button class="text-button" @click="notifications.load()">刷新重试</button></p>
     <div v-if="notifications.loading && !notifications.items.length" class="list-message" role="status">正在加载通知……</div>
     <div v-else-if="!notifications.items.length && !notifications.error" class="empty-state">还没有通知。别人给你的视频点赞或评论时，会出现在这里。</div>

@@ -7,15 +7,22 @@ import (
 	"strings"
 )
 
-// WorkerConfig 是 cmd/worker 的配置：只要数据库和 RabbitMQ，不需要 JWT 之类 API 才用的密钥。
+// WorkerConfig 是 cmd/worker 的配置：要数据库和 RabbitMQ，Redis 可选，不需要 JWT 之类 API 才用的密钥。
 type WorkerConfig struct {
 	DSN     string // GOSTREAM_DSN，和 API 相同
 	AMQPURL string // GOSTREAM_AMQP_URL，形如 amqp://用户名:密码@主机:5672/
+	// Redis 和 API 用同一组变量 GOSTREAM_REDIS_ADDR、GOSTREAM_REDIS_PASSWORD；不配置时 worker 照常写通知，
+	// 只是不发"有新通知"的提示，页面要等下一次轮询才看到。
+	Redis RedisConfig
 }
 
 // LoadWorker 从环境变量读取并检查 worker 配置。
 func LoadWorker() (WorkerConfig, error) {
-	cfg := WorkerConfig{DSN: os.Getenv("GOSTREAM_DSN"), AMQPURL: os.Getenv("GOSTREAM_AMQP_URL")}
+	cfg := WorkerConfig{
+		DSN:     os.Getenv("GOSTREAM_DSN"),
+		AMQPURL: os.Getenv("GOSTREAM_AMQP_URL"),
+		Redis:   RedisConfig{Addr: strings.TrimSpace(os.Getenv("GOSTREAM_REDIS_ADDR")), Password: os.Getenv("GOSTREAM_REDIS_PASSWORD")},
+	}
 	if strings.TrimSpace(cfg.DSN) == "" {
 		return WorkerConfig{}, errors.New("请配置 GOSTREAM_DSN")
 	}

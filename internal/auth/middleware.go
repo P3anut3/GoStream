@@ -42,7 +42,7 @@ func JWTAuth(secret []byte, sessions SessionChecker) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
-		userID, sessionID, err := ParseToken(parts[1], secret)
+		userID, claims, err := parseClaims(parts[1], secret)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, map[string]string{
 				"error": "登录凭证无效或已过期",
@@ -50,6 +50,7 @@ func JWTAuth(secret []byte, sessions SessionChecker) gin.HandlerFunc {
 			c.Abort()
 			return
 		}
+		sessionID := claims.SessionID
 		if sessions != nil {
 			if sessionID == "" {
 				// 改版前签发的 token 没有会话 ID，没法撤销，不再接受。
@@ -69,6 +70,10 @@ func JWTAuth(secret []byte, sessions SessionChecker) gin.HandlerFunc {
 		}
 		// 将验证后的身份放入本次请求上下文
 		c.Set("userID", userID)
+		// 推送这种长连接只在建立时验一次 token，所以还要知道会话 ID 和过期时间：
+		// 心跳时复查会话，到了过期时间就结束连接。
+		c.Set("sessionID", sessionID)
+		c.Set("tokenExpiresAt", claims.ExpiresAt.Time)
 		//继续执行后续处理函数
 		c.Next()
 
