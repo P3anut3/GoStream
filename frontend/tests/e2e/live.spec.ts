@@ -136,6 +136,29 @@ test('real Vue → Gin → MySQL/media: publish/play, feed paging, two-account i
     await expect(bobPage.locator('.video-card')).toHaveCount(0)
   } finally { await context.close() }
 
+  // B's like and comment reach A as notifications through the outbox, RabbitMQ and the worker;
+  // A's own like and comment on her video leave none. The worker needs a moment, so refresh.
+  await page.locator('#nav-notifications').click()
+  await expect(page.getByRole('heading', { name: '通知', exact: true })).toBeVisible()
+  const notices = page.locator('.notification-item')
+  await expect(async () => {
+    await page.getByRole('button', { name: '刷新通知' }).click()
+    await expect(notices).toHaveCount(2, { timeout: 1000 })
+  }).toPass({ timeout: 30000 })
+  await expect(notices.nth(0)).toContainText(`${name}_b 评论了你的视频《${title}》`)
+  await expect(notices.nth(0)).toContainText('评论已删除') // B deleted the comment afterwards
+  await expect(notices.nth(1)).toContainText(`${name}_b 赞了你的视频《${title}》`)
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('2')
+  // Opening one marks it read and opens its video; marking all clears the rest.
+  await notices.nth(1).click()
+  await expect(page).toHaveURL(new RegExp(`#/videos/${published.id}$`))
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('1')
+  await page.locator('#nav-notifications').click()
+  await expect(page.locator('.notification-item.unread')).toHaveCount(1)
+  await page.getByRole('button', { name: '全部已读', exact: true }).click()
+  await expect(page.locator('.notification-item.unread')).toHaveCount(0)
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveCount(0)
+
   await page.goto(`/#/videos/${published.id}`)
   await expect(page.getByText('2 人点赞', { exact: true })).toBeVisible()
   await expect(page.locator('.follow-button')).toHaveCount(0) // authors cannot follow themselves

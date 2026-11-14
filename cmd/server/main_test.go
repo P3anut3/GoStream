@@ -64,6 +64,8 @@ func TestRouterStaticFilesAndAuthentication(t *testing.T) {
 		{"GET", "/media/videos/missing.mp4", "", 404}, {"GET", "/media/covers/", "", 404},
 		{"GET", "/me", "", 401}, {"GET", "/me/videos", "", 401}, {"POST", "/videos", "", 401},
 		{"POST", "/uploads/videos", "", 401}, {"POST", "/uploads/covers", "", 401},
+		{"GET", "/notifications", "", 401}, {"GET", "/notifications/unread-count", "", 401},
+		{"PUT", "/notifications/1/read", "", 401}, {"PUT", "/notifications/read?up_to=1", "", 401},
 		{"GET", "/videos/abc", "", 400}, {"GET", "/videos/abc/comments", "", 400},
 	} {
 		t.Run(tc.method+tc.path+tc.rangeHeader, func(t *testing.T) {

@@ -10,6 +10,7 @@ export const router = createRouter({
     { path: '/following', component: LibraryView, meta: { title: '关注', auth: true } },
     { path: '/publish', component: () => import('./views/PublishView.vue'), meta: { title: '发布视频', auth: true } },
     { path: '/account', component: () => import('./views/AccountView.vue'), meta: { title: '当前用户', auth: true } },
+    { path: '/notifications', component: () => import('./views/NotificationsView.vue'), meta: { title: '通知', auth: true } },
     { path: '/videos/:id', component: () => import('./views/DetailView.vue'), meta: { title: '视频详情' } },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],

@@ -12,7 +12,7 @@
 | 上传与媒体 | MP4、JPEG/PNG 上传，大小和类型检查、随机名、本地保存、公开媒体与 Range | internal/video/handler.go、cover.go、storage.go；internal/httpx | 普通上传；没有分片和断点续传，不是对象存储 |
 | 发布与作品管理 | 校验资源归属，事务和行锁，发布更新上传状态，详情、个人列表、作者删除 | internal/video/handler.go、model.go | 发布/查询等部分仍直接在 Handler 使用 GORM；删作品不会立即删除物理文件 |
 | 最新 Feed | created_at+id 稳定排序、签名游标、limit+1、组合索引、批量作者/点赞信息、游客/登录状态 | internal/feed；scripts/migrations/005_feed_index.sql | MySQL 最新流与关注流（GET /feed/following）；最新流已有 Redis 时间线（最新 500 条，发布/删除后整条重建）；没有热榜或推荐模型 |
-| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入，同一事务写发件箱事件（M4 第一步），由 worker 发到 RabbitMQ（第二步）并写成作者的通知（第三步）；还没有通知列表、已赞列表或 @ 提及 |
+| 点赞与评论 | 重复点赞/取消的幂等语义、联合唯一约束、评论校验/分页/本人删除、跨账号权限 | internal/video/like*、comment* | 同步 MySQL 写入，同一事务写发件箱事件（M4 第一步），由 worker 发到 RabbitMQ（第二步）并写成作者的通知（第三步），作者在通知页查看（第四步）；还没有已赞列表或 @ 提及 |
 | 上传生命周期与清理 | pending/published/deleting，发布与清理协调、过期领取、重试、预览/执行、文件和记录清理 | internal/video/upload*；cmd/cleanup-uploads | 手工运行，没有定时调度；不是所有物理文件的通用回收系统 |
 | 页面 | 登录注册、上传发布、视频库、我的视频、播放、点赞评论 | frontend/src、frontend/tests | 已迁移 Vue/TS/Pinia/Router/Vite；登录状态只在本页内存；自动浏览器验收为 Chromium |
 | 配置与健康 | YAML+env、启动校验、API/清理共用目录和 DSN；healthz/readyz、超时与取消 | internal/config、internal/health；cmd/server/main.go | YAML 路径仍固定；清理加载完整配置，也要求签名密钥有效；没有热加载 |
@@ -32,7 +32,7 @@
 | go-cache / singleflight | 本地短缓存、进程内合并重复回源 | 视频详情已使用：go-cache 5 秒本地缓存挡在 Redis 前面，x/sync singleflight 合并单进程内同一 ID 的回源；最新流时间线的重建也用 singleflight 合并；没有跨实例合并 | 后续缓存按需复用 |
 | amqp091-go / RabbitMQ | 互动、热度、关注和时间线等事件传输 | amqp091-go v1.16.0 已接入发布端和消费端（internal/mq：发布确认、mandatory、仲裁队列、手动确认、拒绝进死信、原地重试） | 热度等其他事件按需扩展 |
 | Worker / Outbox | 独立消费入口，发布事件从本地消息表补发；API 内也运行部分任务 | 事务 Outbox（M4 第一步）、独立 cmd/worker 投递员（第二步：SKIP LOCKED 领取、确认后标记、退避重试、定期清理）和通知消费者（第三步，同一进程的第二个任务）已实现；清理命令不是消息消费者 | — |
-| SSE / 通知 | 通知持久化、列表/未读/已读与实时流 | 通知持久化已实现（notifications 表，按接收者和事件 ID 去重）；列表、未读、已读与 SSE 未实现 | M4 第四步列表与已读，第五步 SSE |
+| SSE / 通知 | 通知持久化、列表/未读/已读与实时流 | 通知持久化（notifications 表，按接收者和事件 ID 去重）、列表、未读数、已读和通知页已实现；SSE 未实现，未读数暂时 60 秒轮询 | M4 第五步 SSE |
 | Vue 3 / TS / Pinia / Router / Vite | 页面组件、类型约束、状态与路由、前端构建；参考 vite 指向 rolldown-vite 别名 | 已迁移，采用原生 Rolldown 的 Vite 8；构建及浏览器验收通过 | M1 已完成此项；不为复制旧别名降级 |
 | spark-md5 / 分片上传 | 浏览器文件摘要、Redis 会话、上传进度与分片合并 | 未实现 | M5 |
 | Docker Compose | MySQL/Redis/RabbitMQ/API/Worker/前端、网络、卷和健康依赖 | 五服务已验收（M4 第二步加入 worker，复用 API 镜像）；Vue 构建产物由 API 镜像提供 | M1 环境就绪，worker 在 M4 第二步加入 |
@@ -45,7 +45,7 @@
 | 业务差距 | 参考实现 | 我们的优先级 |
 | --- | --- | --- |
 | 关注/取关、关注与粉丝列表/计数、关注流 | social 和 feed.ListByFollowing | 关注/取关/状态与关注流已实现；粉丝列表/计数待做 |
-| 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果；通知数据已由 M4 第三步写入，列表与已读在第四步、SSE 在第五步 |
+| 通知列表、未读、已读、SSE | worker/notificationworker.go、ssehub.go | 高：异步主线的用户可见结果；通知写入（第三步）、列表、未读和已读（第四步）已完成，SSE 在第五步 |
 | 分片、进度查询、合并、恢复上传 | video/chunk_handler.go | 高：完整技术栈对齐的一部分，但在 Redis 基础后做 |
 | Refresh Token、服务端登出/撤销、限流 | account/service.go、middleware/jwt、ratelimit | 已在 M3 实现：限流（internal/ratelimit：固定窗口，Redis 故障降级为单机计数）；刷新与撤销（internal/auth/session.go：Redis 会话、refresh token 轮换与重复使用检测，退出后 access token 立刻失效） |
 | 点赞榜、热榜、话题流 | feed 的排行/快照/ZSET 和 ListByTag | 可在缓存/事件基础完成后扩展，热度统计与 MQ 结合 |
@@ -81,7 +81,7 @@ M4 第一至三步已实现事件表 outbox_events、投递员（cmd/worker → 
 | M1 收尾：环境与展示（完成） | 重建验证 SIGTERM；Compose API/MySQL/Redis/RabbitMQ，上传文件持久卷；Vue/TS/Pinia/Router/Vite 迁移；整理 Git 阶段提交/配置远端/基础 CI | 干净环境可启动；API 重建后作品与文件保留；默认停止正常退出；前端构建/类型检查与现有业务通过；CI 实际运行 |
 | M2：关注与关注流（完成） | 关注关系表、幂等操作、防自关注、关注/粉丝查询、关注流、页面入口 | A 关注 B 后出现 B 作品，取消后刷新不出现；不能伪造操作者 |
 | M3：缓存与认证增强（完成） | Cache-Aside → Redis 时间线 → 本地缓存/singleflight；限流；刷新/撤销策略 | 命中/未命中、失效、回源、Redis 故障都有可复现测试；个人状态不污染公共缓存；失效凭证不能通过 |
-| M4：可靠事件与通知（进行中，发件箱、投递员和通知消费者已完成） | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
+| M4：可靠事件与通知（进行中，发件箱、投递员、通知消费者和通知列表已完成） | 业务事务+Outbox、RabbitMQ 发布与消费、独立 Worker、重试/幂等、通知数据与 SSE；有余力再接热度榜 | MQ 故障后补发；重复消息不重复产生结果；作者能收到自己的通知，重连可补读，不能订阅他人通知 |
 | M5：分片续传 | 用户绑定的上传会话、Redis 状态、分片校验/幂等、合并、spark-md5、过期清理 | 中断后只补缺失分片，跨账号不能接管；合并后仍走 uploads → Publish 原有归属与生命周期规则 |
 | M6：工程证据 | 扩展 CI、pprof、请求日志/指标、故障演练、对比测试与文档 | 测试和构建可重复；报告真实环境/数据量/并发/延迟/查询次数；保留诊断和修复证据 |
 

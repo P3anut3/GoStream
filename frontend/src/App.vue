@@ -2,13 +2,16 @@
 import { watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useSessionStore } from './stores/session'
+import { useNotificationStore } from './stores/notifications'
 import AuthDialog from './components/AuthDialog.vue'
-const session = useSessionStore(), route = useRoute(), router = useRouter()
+const session = useSessionStore(), notifications = useNotificationStore(), route = useRoute(), router = useRouter()
 async function logout() {
   if (session.publishing) { session.notify('请等待当前发布完成'); return }
   await session.logout(); session.notify('已退出登录')
 }
 watch(() => session.token, token => { if (!token && route.meta.auth) void router.replace('/') })
+// 登录、退出、换账号时重置通知：登录后开始定时查未读数。
+watch(() => session.user?.id, id => notifications.watchSession(!!id), { immediate: true })
 </script>
 
 <template>
@@ -19,6 +22,7 @@ watch(() => session.token, token => { if (!token && route.meta.auth) void router
       <RouterLink id="nav-library" class="nav-item" exact-active-class="active" to="/"><span>▦</span>视频库<span class="arrow">↗</span></RouterLink>
       <RouterLink id="nav-following" class="nav-item" active-class="active" to="/following"><span>☆</span>关注</RouterLink>
       <RouterLink id="nav-mine" class="nav-item" active-class="active" to="/mine"><span>▷</span>我的视频</RouterLink>
+      <RouterLink id="nav-notifications" class="nav-item" active-class="active" to="/notifications"><span>✉︎</span>通知<span v-if="notifications.unread" class="nav-count" :aria-label="`${notifications.unread} 条未读通知`">{{ notifications.unread > 99 ? '99+' : notifications.unread }}</span></RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/publish"><span>＋</span>发布视频</RouterLink>
       <RouterLink class="nav-item" active-class="active" to="/account"><span>◎</span>当前用户</RouterLink>
     </nav>

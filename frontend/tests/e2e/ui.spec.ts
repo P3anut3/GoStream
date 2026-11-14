@@ -30,6 +30,8 @@ async function mockAPI(page: Page, override?: (route: Route, path: string, metho
       return ok(route, { comments, page: 1, page_size: 5, video_id: 1 })
     }
     if (path === '/comments/1' && method === 'DELETE') { comments = []; return route.fulfill({ status: 204 }) }
+    if (path === '/notifications/unread-count') return ok(route, { count: 0 })
+    if (path === '/notifications') return ok(route, { notifications: [], next_cursor: '', has_more: false })
     await route.continue()
   })
 }
@@ -256,4 +258,74 @@ test('401 clears expired identity and foreign video exposes no delete action', a
   await page.goto('/'); await login(page); await page.goto('/#/videos/2')
   await expect(page.locator('#account-name')).toHaveText('访客模式')
   await expect(page.getByRole('button', { name: '删除视频', exact: true })).toHaveCount(0)
+})
+
+test('notifications: unread count, escaped list, opening marks read, mark all stops at the newest loaded, load more', async ({ page }) => {
+  const notification = (id: number, type: string, extra: Record<string, unknown> = {}) => ({ id, type, actor_id: 2, actor_name: 'bob', video_id: 1, video_title: '测试作品 1', comment_id: null, comment_content: null, created_at: '2026-11-14T10:00:00+08:00', read: false, ...extra })
+  let items = [
+    notification(12, 'comment.created', { comment_id: 5, comment_content: '<img src=x onerror="window.injected=1">好看' }),
+    notification(11, 'comment.created', { comment_id: 4 }), // the comment was deleted
+    notification(10, 'like.created', { actor_name: '<b>carol</b>' }),
+  ]
+  const older = [notification(3, 'like.created', { read: true })]
+  const requests: string[] = []
+  await mockAPI(page, async (route, path, method) => {
+    const url = new URL(route.request().url())
+    if (path === '/notifications/unread-count') { await ok(route, { count: [...items, ...older].filter(n => !n.read).length }); return true }
+    if (path === '/notifications' && method === 'GET') {
+      expect(route.request().headers().authorization).toBe('Bearer test-issued-token')
+      const cursor = url.searchParams.get('cursor') || ''
+      requests.push(`list:${cursor}`)
+      await ok(route, cursor === '10' ? { notifications: older, next_cursor: '', has_more: false } : { notifications: items, next_cursor: '10', has_more: true })
+      return true
+    }
+    const one = path.match(/^\/notifications\/(\d+)\/read$/)
+    if (one && method === 'PUT') {
+      requests.push(`read:${one[1]}`); items = items.map(n => n.id === Number(one[1]) ? { ...n, read: true } : n)
+      await route.fulfill({ status: 204 }); return true
+    }
+    if (path === '/notifications/read' && method === 'PUT') {
+      const upTo = Number(url.searchParams.get('up_to')); requests.push(`all:${upTo}`)
+      items = items.map(n => n.id <= upTo ? { ...n, read: true } : n)
+      await route.fulfill({ status: 204 }); return true
+    }
+    return false
+  })
+  // Guests log in first and land on the page they asked for.
+  await page.goto('/#/notifications')
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByLabel('用户名', { exact: true }).fill('alice'); await page.getByLabel('密码', { exact: true }).fill('test-password-123')
+  await page.locator('.auth-modal button[type="submit"]').click()
+  await expect(page).toHaveURL(/#\/notifications$/)
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('3')
+  const rows = page.locator('.notification-item')
+  await expect(rows).toHaveCount(3)
+  // User text stays text: no element is created from it and no script runs.
+  await expect(rows.nth(0)).toContainText('bob 评论了你的视频《测试作品 1》')
+  await expect(rows.nth(0)).toContainText('<img src=x onerror="window.injected=1">好看')
+  await expect(rows.nth(1)).toContainText('评论已删除')
+  await expect(rows.nth(2)).toContainText('<b>carol</b> 赞了你的视频《测试作品 1》')
+  expect(await page.locator('.notification-list img, .notification-list b').count()).toBe(0)
+  expect(await page.evaluate(() => (window as any).injected)).toBeUndefined()
+  // Load more reads from the cursor.
+  await page.getByRole('button', { name: '加载更多', exact: true }).click()
+  await expect(rows).toHaveCount(4)
+  await expect(page.getByRole('button', { name: '没有更多通知了' })).toBeDisabled()
+  // Opening one marks it read and opens its video.
+  await rows.nth(2).click()
+  await expect(page).toHaveURL(/#\/videos\/1$/)
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('2')
+  // A notification newer than the page arrives; marking all stops at the newest one loaded.
+  await page.locator('#nav-notifications').click()
+  await expect(rows).toHaveCount(3)
+  items = [notification(13, 'like.created'), ...items]
+  await page.getByRole('button', { name: '全部已读', exact: true }).click()
+  await expect(page.locator('#nav-notifications .nav-count')).toHaveText('1')
+  await expect(page.locator('.notification-item.unread')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '全部已读', exact: true })).toBeDisabled()
+  expect(requests).toEqual(['list:', 'list:10', 'read:10', 'list:', 'all:12'])
+  // The refresh button brings in the new one, still unread.
+  await page.getByRole('button', { name: '刷新通知' }).click()
+  await expect(rows).toHaveCount(4)
+  await expect(page.locator('.notification-item.unread')).toHaveCount(1)
 })

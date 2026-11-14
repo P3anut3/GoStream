@@ -25,7 +25,8 @@
 - 登录会话：refresh token 7 天滑动过期，每次刷新都换新的，已换掉的旧 token 再被使用时注销整个会话；会话存在 Redis（只存哈希），未配置 Redis 时存在本进程内存。刷新页面不用重新登录，退出登录在服务端生效。
 - 事件发件箱（M4 第一步）：点赞和评论成功时，在同一个 MySQL 事务里往 `outbox_events` 写一条待发送事件（`like.created`、`comment.created`，只存 ID）；重复点赞、给自己的视频点赞或评论都不写。事件先存在发件箱里，再由投递员发到 RabbitMQ（见下一条）。
 - 投递员 worker（M4 第二步）：独立进程 `cmd/worker` 每秒用 `FOR UPDATE SKIP LOCKED` 从发件箱领一批待发送事件，发到 RabbitMQ 的 topic 交换机 `gostream.events`（routing key 是事件类型）；RabbitMQ 确认收到、且没有因为无队列接收而退回时，才填上 `published_at`。RabbitMQ 不可用时事件留在发件箱，退避重试后自动补发；每小时删除发出满 7 天的事件。事件发到通知队列 `gostream.notifications`，再由消费者写成通知（见下一条）。
-- 通知消费者（M4 第三步）：worker 里的第二个任务从 `gostream.notifications` 取消息，把点赞、评论事件写成视频作者的通知（`notifications` 表，008 迁移），数据库提交后才确认（ACK）。同一事件只留一条通知（唯一键去重），视频已经删除的事件不写；事件本身有问题的消息直接进死信队列，数据库暂时不可用时原地等待、重试同一条，不退回队列。通知列表接口和页面在第四步。
+- 通知消费者（M4 第三步）：worker 里的第二个任务从 `gostream.notifications` 取消息，把点赞、评论事件写成视频作者的通知（`notifications` 表，008 迁移），数据库提交后才确认（ACK）。同一事件只留一条通知（唯一键去重），视频已经删除的事件不写；事件本身有问题的消息直接进死信队列，数据库暂时不可用时原地等待、重试同一条，不退回队列。作者在通知页查看（见下一条）。
+- 通知列表与已读（M4 第四步）：侧栏“通知”显示未读数（登录后每 60 秒查一次），通知页从新到旧列出谁赞了、评论了你的哪个视频（评论被删除时显示“评论已删除”），按游标加载更多；点一条通知会标记已读并打开视频，“全部已读”只标页面上已经显示的通知。`GET /notifications`、`GET /notifications/unread-count`、`PUT /notifications/:id/read`、`PUT /notifications/read?up_to=` 都要登录，每个人只能看到、改动自己的通知。
 
 当前已迁移到 Gin 1.11.0 + GORM 1.31.1（MySQL 驱动 1.6.0）。阅读变化见 [迁移指南](docs/learning/02_gin_gorm_migration.md)。已通过 go-redis 接入 Redis（视频详情与最新流缓存、限流计数、登录会话）；已通过 amqp091-go 接入 RabbitMQ（worker 进程发送发件箱事件，并消费通知队列写成通知）；API 仍为单进程模块化应用，另有独立的 worker 进程。
 
@@ -293,13 +294,13 @@ try {
 
 测试在进程内构造 HTTP 请求，连接真实 MySQL，创建两个临时账号和测试视频，结束时按本次生成的唯一用户名清理。它会改变自增计数，不是完全只读的测试。联调场景覆盖评论删除及评论作者/视频作者区分、评论分页、空数组及视频隔离、发表评论、字符边界、身份防伪和评论级联清理、取消点赞及双账号、双视频隔离、点赞及联合主键去重、删除视频级联清理点赞、双账号个人列表隔离、公共列表、封面上传及类型记录、默认及本人封面发布、封面归属和地址校验、发布权限、本站路径校验、文件类型限制，以及缺少/无效 token、非法/零 ID、他人不能删除、越权尝试后记录保留、作者删除、删除后查询和重复删除。本人上传及发布也在准备测试数据时验证；数据库查询失败通过独立测试模拟。
 
-关注关系、关注流、视频详情缓存、最新流时间线、登录会话与事件发件箱的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
+关注关系、关注流、视频详情缓存、最新流时间线、登录会话、事件发件箱与通知的 MySQL 测试不读取 `.env`（缓存测试使用进程内的 miniredis，不需要真实 Redis），只连接 `GOSTREAM_TEST_MYSQL_DSN` 指向的一次性 MySQL，在自建的随机库中运行并在结束时删除该库。例如先用 Docker 启动临时库，等待约 10～20 秒就绪后执行：
 
 ```powershell
 docker run -d --rm --name gostream-test-mysql -p 127.0.0.1:13399:3306 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4.9
 $env:GOSTREAM_TEST_MYSQL_DSN = 'root@tcp(127.0.0.1:13399)/'
 try {
-    go test -v ./internal/follow ./internal/feed ./internal/video ./internal/notification ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration|TestAuthSessionHTTPIntegration|TestOutboxMySQLIntegration|TestNotificationMySQLIntegration)$' -count=1
+    go test -v ./internal/follow ./internal/feed ./internal/video ./internal/notification ./cmd/server -run '^(TestGORMRepositoryMySQLIntegration|TestFollowHTTPMySQLIntegration|TestListFollowingMySQLIntegration|TestFollowingFeedHTTPMySQLIntegration|TestVideoDetailCacheHTTPIntegration|TestLatestFeedTimelineHTTPIntegration|TestAuthSessionHTTPIntegration|TestOutboxMySQLIntegration|TestNotificationMySQLIntegration|TestNotificationListMySQLIntegration|TestNotificationHTTPMySQLIntegration)$' -count=1
 } finally {
     Remove-Item Env:GOSTREAM_TEST_MYSQL_DSN -ErrorAction SilentlyContinue
     docker rm -f gostream-test-mysql
@@ -346,7 +347,7 @@ try {
 | `internal/ratelimit/` | 固定窗口限流：Redis 计数、单机计数、Redis 故障时的降级包装和 Gin 中间件 |
 | `internal/outbox/` | 事件发件箱：事件类型和内容（`events.go`），在调用方的事务里写一行待发送事件（`outbox.go`），投递员领取、发送、标记和清理（`relay.go`） |
 | `internal/mq/` | RabbitMQ：声明交换机、通知队列和死信队列（`topology.go`），带发布确认和 mandatory 的发布器，断线后重连（`publisher.go`），手动确认、拒绝进死信、原地重试的消费者（`consumer.go`） |
-| `internal/notification/` | 通知：事件转换成通知（`notification.go`），写 `notifications` 表并翻译数据库错误（`repository.go`），处理一个事件（`service.go`） |
+| `internal/notification/` | 通知：事件转换成通知、列表条目和分页结构（`notification.go`），读写 `notifications` 表并翻译数据库错误（`repository.go`），处理事件、分页和已读（`service.go`），列表、未读数、已读接口（`handler.go`） |
 | `cmd/worker/` | 后台进程：读取 worker 配置（`internal/config/worker.go`），同时运行发件箱投递员和通知消费者，收到 SIGTERM 后退出 |
 | `frontend/` | Vue/TS 源码、状态、路由、Vite 构建和前端测试 |
 | `web/dist/` | 可重建的前端产物，Git 忽略；旧 web 文件仅作迁移对照 |
@@ -354,11 +355,11 @@ try {
 | `.github/workflows/ci.yml` | Go 检查/race、前端检查/构建和浏览器夹具回归 |
 | `scripts/schema.sql` | 数据库初始建表脚本 |
 
-目录按业务和职责分包，HTTP 服务仍是一个进程，另有后台进程 `cmd/worker`（投递员和通知消费者）和独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`、`feed`、`follow`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询、关注关系也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
+目录按业务和职责分包，HTTP 服务仍是一个进程，另有后台进程 `cmd/worker`（投递员和通知消费者）和独立的手动清理命令。启动入口依赖 `database`、`auth`、`user`、`video`、`feed`、`follow`、`notification`，`user` 依赖 `auth`；鉴权包不依赖用户业务包。`internal` 限制这些包供本项目内部使用。评论、点赞和上传清理使用 service/repository 分层；用户注册、登录和当前用户查询、关注关系、通知也已完成 Handler → Service → Repository 分层；视频元数据与发布等部分 GORM 数据访问仍在 Handler 中。
 
 ## 下一阶段
 
-M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱（点赞、评论与事件在同一个事务里提交）、第二步投递员（`cmd/worker` 把发件箱里的事件发到 RabbitMQ）和第三步通知消费者（把通知队列里的事件写成作者的通知）已完成；接下来是通知列表接口与页面（第四步），然后是 SSE 提醒。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
+M2 关注关系与关注流已完成。M3 已完成：视频详情的 Cache-Aside、本地缓存、singleflight、空值缓存、最新流时间线，登录、注册、刷新和写操作限流，以及登录凭证的刷新与撤销。M4 进行中：第一步事件发件箱（点赞、评论与事件在同一个事务里提交）、第二步投递员（`cmd/worker` 把发件箱里的事件发到 RabbitMQ）、第三步通知消费者（把通知队列里的事件写成作者的通知）和第四步通知列表与已读（接口、侧栏未读数和通知页）已完成；接下来是 SSE 实时提醒（第五步）。当前没有分片续传；按主线分阶段实现，见项目计划。基础 CI 在每次 push/PR 时由 GitHub Actions 运行（首次运行已通过）；它不包含需要真实 MySQL 或 Docker 的集成测试。
 
 ### 上传表迁移
 
@@ -576,7 +577,7 @@ worker 里和投递员并排运行的第二个任务：从 `gostream.notificatio
 
 表 `notifications`（`scripts/migrations/008_notifications.sql`）：`recipient_id`（视频作者）、`actor_id`、`event_id`、`event_type`、`video_id`、`comment_id`（只有评论通知有）、`created_at`（事件发生的时间，取自消息的 timestamp，RabbitMQ 积压时也不变）、`read_at`（NULL 表示未读，第四步使用）。唯一键 `(recipient_id, event_id)` 让同一条消息投递两次也只留一条通知；`(recipient_id, id)` 索引留给第四步的通知列表。视频外键带 `ON DELETE CASCADE`，作者删除视频时通知一起删除（变异测试显示，去掉它以后，有通知的视频就删不掉了）；`comment_id` 不加外键，评论被删除时通知保留。
 
-`internal/notification`（通知列表接口在第四步加入）：
+`internal/notification`（第四步又加了通知列表和已读，见下一节）：
 
 - `FromEvent` 按事件类型把 payload 解析成第一步的 `outbox.LikeCreated` / `outbox.CommentCreated`；类型不认识、内容解析不了、缺少 ID 或时间、自己给自己的事件都返回 `ErrInvalidEvent`。
 - `GORMRepository.Create` 用 `INSERT … SELECT … FROM videos WHERE id = ?` 写入：视频已删除时插入 0 行，算处理完；唯一键冲突（1062）说明是重复投递，也算处理完；外键检查失败（1452，用户不存在）返回 `ErrInvalidEvent`；其他错误原样返回。
@@ -595,3 +596,27 @@ worker 里和投递员并排运行的第二个任务：从 `gostream.notificatio
 已知限制：死信队列只能在管理页面人工查看，没有自动重放和监控；消费者假设消息来自投递员；数据库长时间不可用时，拿在手里的消息超过 RabbitMQ 的确认超时（consumer_timeout，默认 30 分钟）会被重新投递并计一次投递次数，按默认值推算约 3 小时后进入死信队列（未实测）；部署顺序应先执行 008 再换新 worker，顺序反了不会丢消息，消费者会一直重试，日志持续报错，直到表建好。
 
 默认测试覆盖：`FromEvent` 的点赞、评论和 17 种无效事件；Service 不把无效事件交给数据库、数据库错误原样返回；Repository 用假驱动检查 SQL、参数顺序、评论 ID、1062 算完成、1452 算无效、其他错误可重试；消费者用假的应答记录检查先处理后确认、拒绝不重新入队、坏的 `message_id` 直接拒绝、用 `testing/synctest` 的虚拟时钟检查原地重试（上限 5 秒时为 1、2、4、5、5、5 秒）且中间不退回队列、停止时不应答、确认失败时重连、时间的处理、默认值、连不上时反复重连且日志不含密码；`handleEvent` 只把无效事件变成拒绝。`TestNotificationMySQLIntegration`（MySQL）检查 `schema.sql` 与 008 建出的表完全一致、点赞和评论变成带事件时间的未读通知、重复事件（包括 8 个同时到达）只留一条、删除评论通知保留、已删除视频的事件不写、删除视频时通知一起删除、用户不存在的事件无效、数据库不可用时可以重试。`TestConsumerRabbitMQIntegration`（RabbitMQ）检查确认、拒绝进死信、暂时失败原地重试、队列被删除后重新声明并订阅、prefetch 为 2 时只拿 2 条、一直不应答的消息投递 6 次后进死信。`TestWorkerTurnsEventsIntoNotifications`（MySQL + RabbitMQ）检查 RabbitMQ 不可用时事件留在发件箱，可用后点赞和评论变成通知、通知时间等于事件写进发件箱的时间、内容不完整的事件进死信、队列清空、取消后干净退出。变异测试改错 60 处（47 处单元测试、13 处需要真实 MySQL 或 RabbitMQ），全部被抓住。隔离 Compose 验收（带真实浏览器）检查第二个账号点赞后作者有了通知、发件箱和通知队列清空、死信队列为空；worker 停止期间的评论留在发件箱，容器重建、worker 重新启动后变成通知，点赞通知仍只有一条。
+
+### 通知列表与已读（M4 第四步）
+
+四个接口都要登录，接收者只取自 JWT 中间件放进上下文的用户 ID，每条 SQL 都带 `recipient_id = ?`；查询参数里的用户 ID 一律忽略。
+
+| 接口 | 作用 | 成功 | 失败 |
+| --- | --- | --- | --- |
+| `GET /notifications?limit=20&cursor=` | 通知列表，新的在前 | 200 `{"notifications": [...], "next_cursor": "41", "has_more": true}` | limit 不在 1～50、cursor 不是正整数时 400 |
+| `GET /notifications/unread-count` | 未读数 | 200 `{"count": 3}` | — |
+| `PUT /notifications/:id/read` | 标记一条已读 | 204（第一次和重复标记都是） | ID 不是正整数 400；不存在或不是自己的 404 |
+| `PUT /notifications/read?up_to=41` | 把 id 不大于 up_to 的未读通知标成已读 | 204 | up_to 缺失或不是正整数 400 |
+
+两个 GET 带 `Cache-Control: private, no-store` 和 `Vary: Authorization`；两个 PUT 和点赞、关注共用每人每分钟 60 次的写操作额度。列表的每一条是扁平字段：`id`、`type`、`actor_id`、`actor_name`、`video_id`、`video_title`、`comment_id`（点赞是 null）、`comment_content`（点赞或评论已删除时是 null）、`created_at`、`read`；没有通知时 `notifications` 是 `[]`，不是 null。
+
+- 列表用一条 SQL：`JOIN users`、`JOIN videos` 带出用户名和视频标题，`LEFT JOIN video_comments` 带出评论内容（评论删了也不丢通知），不再逐条查询（避免 N+1）。
+- 翻页用游标：`next_cursor` 是本页最后一条的 id，下一页查 `id < cursor`，`ORDER BY id DESC`，Service 多查一条判断有没有下一页，走 `(recipient_id, id)` 索引。翻页期间到达的新通知排在最前面，不会让后面的页重复或漏掉（OFFSET 会）。游标不签名：查询永远限定在自己的通知里，改游标也只能翻到自己的。
+- 单条已读：`UPDATE … SET read_at = NOW() WHERE id = ? AND recipient_id = ? AND read_at IS NULL`；改到 0 行时再用 `EXISTS` 分清“已经读过”（204）和“不存在或不是自己的”（404）。两种 404 完全一样，别人没法试探哪些 ID 存在；`read_at IS NULL` 让重复标记保留第一次读的时间。
+- 全部已读：`up_to` 是页面上最新那条的 id，打开页面之后才到的通知不会被一起标掉。
+- 未读数：`SELECT COUNT(*) … WHERE recipient_id = ? AND read_at IS NULL`。`scripts/migrations/009_notifications_unread_index.sql` 加了 `(recipient_id, read_at)` 索引；测试插入 600 行、`ANALYZE TABLE` 后 EXPLAIN 为 `type=ref key=idx_notifications_unread Extra=Using where; Using index`（只读索引，不回表）。去掉这个索引时，MySQL 改用唯一键 `uk_notifications_recipient_event`，`Extra` 只剩 `Using where`，要逐行回表看 `read_at`。
+- 前端：侧栏“通知”带未读数（0 不显示，超过 99 显示 99+）；登录、恢复登录时查一次，之后每 60 秒查一次，标记已读后立即刷新，查询失败时保留原来的数字；换账号时丢弃旧账号还没返回的结果。通知页 `/notifications` 需要登录，未读的高亮显示，有“刷新通知”“全部已读”“加载更多”；点一条先标记已读再打开视频，标记失败也照样打开。用户名、标题和评论内容都按文本显示，不会被当成 HTML。手机宽度下侧栏导航排成两行（6 个入口放在一行会横向溢出）。开发服务器的代理也加上了 `/notifications`。
+
+已知限制：未读数靠 60 秒轮询，最多晚 1 分钟，第五步改成服务端推送；不能删除通知，也没有免打扰设置；只有点赞和评论两种通知。
+
+默认测试覆盖：Service 的默认和最大条数、多查一条算 `has_more`、游标从本页最后一条开始、坏的 limit 和游标不进数据库、空列表是 `[]`；Handler 的 JSON 字段和顺序、缓存头、400/404/500、数据库错误不外泄、上下文里没有用户时一律 500 且不碰数据库、查询参数里的用户 ID 被忽略；Repository 用假驱动检查四条 SQL、参数顺序、NULL 和已读标记的读取、已读和“不是自己的”两种零行情况。`TestNotificationListMySQLIntegration`（MySQL）检查翻页和字段、删除评论后内容为 null、每个人只看到和数到自己的、重复标记保留第一次读的时间、别人的和不存在的都是未找到、全部已读停在 up_to 且不碰别人的通知（up_to 越过别人的通知也一样），以及 EXPLAIN；`TestNotificationMySQLIntegration` 同时检查 `schema.sql` 与 008、009 建出的表完全一致。`TestNotificationHTTPMySQLIntegration` 经真实路由走完：粉丝点赞、评论、取消再点赞，把发件箱事件交给通知服务（代替 worker），作者翻页、计数、标记，粉丝看不到也改不了作者的通知。路由测试检查四个接口未登录时 401、两个 PUT 计入写操作额度。前端单元测试覆盖轮询、失败保留计数、换账号丢弃旧结果、游标续读和去重、标记一条和全部已读；夹具浏览器测试覆盖登录后回到通知页、未读数、转义显示、加载更多、点开标记已读、全部已读停在已加载的最新一条、刷新后新通知仍是未读；真实浏览器测试（Compose）让第二个账号点赞、评论后，作者在通知页收到两条通知、点开一条、全部已读。变异测试改错 45 处（34 处单元测试、11 处需要真实 MySQL），全部被抓住。

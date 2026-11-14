@@ -6,6 +6,8 @@
 
 更新（2026-11-14，M4 第三步）：worker 同时运行通知消费者，把通知队列里的事件写进新表 notifications（008 迁移），服务数不变。gostream-dev 已经用户同意执行 008，并用 `up -d --no-build --no-deps --wait api worker` 只重建这两个容器；此前排队的 4 条消息变成作者 1 的 4 条通知，通知队列清空，死信队列为 0。
 
+更新（2026-11-14，M4 第四步）：API 新增通知列表、未读数和已读接口，页面新增“通知”入口和通知页，服务数不变。gostream-dev 已经用户同意执行 009（只给 notifications 加 `idx_notifications_unread (recipient_id, read_at)` 索引，4 条通知不变），并同样只重建 api 和 worker；`/healthz`、`/readyz` 返回 200，不带凭证访问 `/notifications`、`/notifications/unread-count` 返回 401。
+
 本机 `gostream-dev` 开发栈已启动，四服务均 healthy；首页返回 200，`/healthz` 和 `/readyz` 均返回 ok。使用全新的开发卷，没有导入原 Windows MySQL 数据。原停止状态的 redis 容器和原本机配置保留。
 
 ## 1. 这一轮解决什么问题
@@ -113,6 +115,8 @@ Compose 测试使用随机项目名、独立随机凭证、随机本机端口和
 M4 第二步（2026-11-13）扩展了 Compose 测试：确认 worker 在运行；第二个账号点赞后，等发件箱没有待发事件，再用管理 API 查看通知队列，找到这次点赞的 `like.created` 消息（查看后放回队列，最多查看两次，因为每次查看都计入仲裁队列的投递次数上限）；默认 SIGTERM 停止 worker，退出码为 0；重建全部容器后这条消息仍在队列里。本轮 `TestComposeEnvironmentIntegration` 通过。（第三步起改为下面的检查。）
 
 M4 第三步（2026-11-14）把这部分改为检查通知：第二个账号点赞后，等作者有了这条点赞通知、发件箱没有待发事件、通知队列清空（用容器里的 `rabbitmqctl list_queues` 计数，不取消息），并确认死信队列为空；默认 SIGTERM 停止 worker（退出码 0）后再评论一次，确认事件留在发件箱、还没有通知；重建全部容器后，点赞通知仍然只有一条，评论在 worker 重新启动后变成通知。本轮带真实浏览器的 `TestComposeEnvironmentIntegration` 通过（约 60 秒，本机记录，不是性能结论）。
+
+M4 第四步（2026-11-14）再加上接口层面的检查：作者通过 `GET /notifications` 读到粉丝的点赞（未读），`GET /notifications/unread-count` 为 1；重建后能读到点赞和评论两条未读通知，未读数为 2。真实浏览器测试（`frontend/tests/e2e/live.spec.ts`）也加了通知：第二个账号点赞、评论后，作者在通知页收到两条通知（评论已被删除，显示“评论已删除”），点开一条变成已读并打开视频，“全部已读”后未读数消失。本轮 `TestComposeEnvironmentIntegration` 通过（约 59 秒）。
 
 准备好四个本地镜像后可复现 Compose 测试：
 

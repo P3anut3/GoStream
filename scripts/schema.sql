@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS notifications ( -- 通知：消费者按事件写入�
     KEY idx_notifications_recipient_id (recipient_id, id),
     KEY idx_notifications_actor_id (actor_id),
     KEY idx_notifications_video_id (video_id),
+    KEY idx_notifications_unread (recipient_id, read_at),
     CONSTRAINT fk_notifications_recipient FOREIGN KEY (recipient_id) REFERENCES users(id),
     CONSTRAINT fk_notifications_actor FOREIGN KEY (actor_id) REFERENCES users(id),
     CONSTRAINT fk_notifications_video FOREIGN KEY (video_id) REFERENCES videos(id)

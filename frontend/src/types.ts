@@ -19,3 +19,17 @@ export interface Comment { id: number; user_id: number; video_id: number; conten
 export interface CommentPage { comments: Comment[]; page: number; page_size: number; video_id: number }
 export interface VideoUpload { play_url: string; saved_name: string; filename: string; size: number }
 export interface CoverUpload { cover_url: string; saved_name: string; filename: string; size: number }
+export interface NotificationItem {
+  id: number
+  type: string // like.created 或 comment.created
+  actor_id: number
+  actor_name: string
+  video_id: number
+  video_title: string
+  comment_id: number | null // 点赞通知是 null
+  comment_content: string | null // 点赞通知、评论已删除时是 null
+  created_at: string
+  read: boolean
+}
+export interface NotificationPage { notifications: NotificationItem[]; next_cursor: string; has_more: boolean }
+export interface UnreadCount { count: number }

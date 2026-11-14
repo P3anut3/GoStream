@@ -17,6 +17,7 @@ import (
 	"gostream/internal/feed"
 	"gostream/internal/follow"
 	"gostream/internal/httpx"
+	"gostream/internal/notification"
 	"gostream/internal/ratelimit"
 	"gostream/internal/user"
 	"gostream/internal/video"
@@ -149,6 +150,8 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	followRepository := &follow.GORMRepository{DB: db}
 	followService := follow.NewService(followRepository)
 	followHandler := follow.NewHandler(followService)
+	// 通知由 worker 写入，这里只读和标记已读；每个请求只能看到、改动当前登录用户自己的通知。
+	notifications := notification.NewHandler(notification.NewService(&notification.GORMRepository{DB: db}))
 	// 每个需要登录的请求都要验签名，并确认会话还在：退出登录后，这个会话签发的 access token 立刻失效。
 	jwt := auth.JWTAuth(secret, sessions)
 	// 限流：有 Redis 时所有实例共用计数，Redis 出错就降级为单机计数；没有 Redis 时只做单机计数。
@@ -187,6 +190,10 @@ func newRouter(db *gorm.DB, secret []byte, feedCursor *feed.CursorCodec, storage
 	router.PUT("/users/:id/follow", jwt, writeLimit, followHandler.Follow)
 	router.GET("/users/:id/follow", jwt, followHandler.GetStatus)
 	router.DELETE("/users/:id/follow", jwt, writeLimit, followHandler.Unfollow)
+	router.GET("/notifications", jwt, notifications.List)
+	router.GET("/notifications/unread-count", jwt, notifications.UnreadCount)
+	router.PUT("/notifications/read", jwt, writeLimit, notifications.MarkAllRead)
+	router.PUT("/notifications/:id/read", jwt, writeLimit, notifications.MarkRead)
 	httpx.RegisterWeb(router, "web/dist")
 	httpx.RegisterMedia(router, "/media/videos", videos.UploadDir)
 	httpx.RegisterMedia(router, "/media/covers", videos.CoverDir)

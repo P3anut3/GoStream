@@ -42,7 +42,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 3. `docs/learning/13_vue_migration.md`：最新前端、部署和验收记录。
 4. `README.md`、`frontend/README.md`：启动与复现命令。
 5. `cmd/server/main.go`：配置、依赖装配、实际路由和退出信号；`cmd/worker/main.go`：后台 worker（发件箱投递员和通知消费者）的配置、装配和退出信号。
-6. `scripts/schema.sql`、`scripts/migrations/`：八张现有表及 001～008 迁移。
+6. `scripts/schema.sql`、`scripts/migrations/`：八张现有表及 001～009 迁移。
 7. 改 Feed 或关注流前读 `internal/feed/{entity,cursor,service,repository,handler}.go`。
 
 其他记录：07 为 M0 验收，08 配置，09 健康检查，10 Docker，12 Compose。较早文档记录的是当时实现；最新现状以源码和 00/11/13 为准。
@@ -60,7 +60,8 @@ https://github.com/LeoninCS/feedsystem_video_go
 | 评论 | 创建、分页、仅评论作者删除、Unicode 内容校验 | `internal/video/comment*`；已分层，同步 MySQL 写入 |
 | 事件发件箱 | 点赞、评论与 `like.created`/`comment.created` 事件在同一事务写入 `outbox_events`；重复点赞、自己的视频、不存在的视频不写事件 | `internal/outbox`、`007_outbox_events.sql`；投递员发送成功后才填 `published_at` |
 | 发件箱投递 worker | 独立进程每秒用 `FOR UPDATE SKIP LOCKED`（读已提交）领一批事件，发到 RabbitMQ topic 交换机 `gostream.events`，确认收到且未被退回才标记；失败退避 1→30 秒；每小时删除发出满 7 天的事件 | `cmd/worker`、`internal/outbox/relay.go`、`internal/mq`；Compose worker 服务 |
-| 通知消费者 | worker 的第二个任务从 `gostream.notifications` 取消息写成作者的通知，数据库提交后才 ACK；唯一键 `(recipient_id, event_id)` 去重，视频已删的事件不写；无效事件拒绝进死信，数据库错误原地退避重试、不退回队列；prefetch 10 | `internal/notification`、`internal/mq/consumer.go`、`008_notifications.sql`；还没有通知列表接口和页面（第四步）、SSE（第五步） |
+| 通知消费者 | worker 的第二个任务从 `gostream.notifications` 取消息写成作者的通知，数据库提交后才 ACK；唯一键 `(recipient_id, event_id)` 去重，视频已删的事件不写；无效事件拒绝进死信，数据库错误原地退避重试、不退回队列；prefetch 10 | `internal/notification`、`internal/mq/consumer.go`、`008_notifications.sql`；SSE 在第五步 |
+| 通知列表与已读 | `GET /notifications`（id 倒序、游标翻页、JOIN 带出用户名/标题/评论）、未读数、单条已读（幂等，别人的和不存在的都 404）、全部已读（只到 `up_to`）；侧栏未读数（60 秒轮询）和通知页 | `internal/notification/handler.go` 等、`009_notifications_unread_index.sql`（未读数的覆盖索引）、`frontend/src/views/NotificationsView.vue`、`stores/notifications.ts`；没有实时推送、删除和免打扰 |
 | 关注关系 | 关注/取消/状态；有向、幂等、禁止自关注、目标不存在 404 | `internal/follow`、`006_follows.sql`；已分层；关注按钮与关注流（GET /feed/following、关注标签页）已完成 |
 | 视频详情缓存 | GET /videos/:id 两级缓存：进程内 go-cache 5 秒 + Redis Cache-Aside；未命中经 singleflight 合并回源；不存在的 ID 写 30 秒标记；删除后失效、发布后清标记；Redis 故障降级 MySQL | `internal/video/video_{repository,cache,local_cache,service}.go`；Redis TTL 10 分钟加抖动；singleflight 只合并单进程内的回源；多实例的本地缓存最多陈旧 5 秒 |
 | 限流 | 登录、注册按客户端 IP，写操作按登录用户，固定窗口计数；超限返回 429 + Retry-After；Redis 故障或未配置时改用单机计数 | `internal/ratelimit`；登录每分钟 10 次、注册每小时 10 个、发布/上传/评论/点赞/关注/删除共用每分钟 60 次；读接口未限流，没有按账号限流 |
@@ -75,7 +76,7 @@ https://github.com/LeoninCS/feedsystem_video_go
 重要边界：
 
 - Redis 已通过 go-redis v9 用于视频详情缓存（Cache-Aside、删除后失效、故障降级），前面还有 go-cache 进程内缓存，回源经 singleflight 合并；最新流有 Redis 时间线；限流计数也放在 Redis（故障时降级为单机计数）；登录会话存在 Redis（故障时已登录的请求按签名放行，登录和刷新返回 503）；关注流还没有缓存。RabbitMQ 已通过 amqp091-go 接入发件箱投递（发布确认、mandatory、持久化 quorum 队列和死信队列）和通知消费（手动确认、拒绝进死信、原地重试）。
-- 已有 outbox_events、发件箱投递员和通知消费者（M4 第一至三步），通知已写进 `notifications` 表，但还没有读取通知的接口和页面，也没有 SSE 或分片上传，不能说用户已经能看到通知。
+- 已有 outbox_events、发件箱投递员、通知消费者和通知列表（M4 第一至四步）：作者能在通知页看到并标记通知。但未读数靠 60 秒轮询，还没有 SSE 实时提醒，也没有分片上传。
 - 删除作品会删除作品记录，当前不会立即删除物理视频文件；不要把这个既定行为当成前端迁移遗漏。
 - 已发布文件不属于“过期未发布上传”的清理范围；pending 是上传生命周期，不是审核状态。
 - 媒体公开可读；未发布文件知道地址也能访问。前端隐藏按钮不等于后端授权。
@@ -100,12 +101,12 @@ GoStream/
 │   ├── ratelimit/              # 固定窗口限流
 │   ├── outbox/                 # 事件发件箱与投递员
 │   ├── mq/                     # RabbitMQ 拓扑、带确认的发布器、消费者
-│   ├── notification/           # 事件转成通知、写 notifications 表
+│   ├── notification/           # 事件转成通知；通知列表、未读数、已读接口
 │   ├── health/                 # Live、Ready
 │   └── httpx/                  # 请求体限制、媒体、Vue 产物路由
 ├── frontend/                   # 当前 Vue 源码、锁文件和测试
 ├── web/dist/                   # Vite 生成产物，Git 忽略
-├── scripts/                    # 初始 schema、001～008 迁移、环境生成
+├── scripts/                    # 初始 schema、001～009 迁移、环境生成
 ├── docs/learning/              # 学习与验收文档
 ├── compose.yaml
 ├── Dockerfile
@@ -285,6 +286,8 @@ M4 第二步（2026-11-13）：发件箱投递员已完成。`internal/outbox/re
 
 M4 第三步（2026-11-14）：通知消费者已完成。新表 `notifications`（`recipient_id`、`actor_id`、`event_id`、`event_type`、`video_id`、`comment_id` 只有评论有、`created_at` 为事件时间、`read_at` 为 NULL 表示未读；唯一键 `(recipient_id, event_id)`，索引 `(recipient_id, id)`；视频外键 `ON DELETE CASCADE`，`comment_id` 不加外键），已有库执行 `008_notifications.sql`。`internal/notification`（用户编写）：`FromEvent` 把事件解析成第一步的载荷结构，类型未知、解析失败、缺 ID 或时间、自己给自己都返回 `ErrInvalidEvent`；`GORMRepository.Create` 用 `INSERT … SELECT … FROM videos`，视频已删插入 0 行算完成、1062 算完成、1452 算无效；`Service.HandleEvent` 先转换再保存。`internal/mq/consumer.go`：每次连接声明拓扑、prefetch 10、手动确认；处理完才 ACK，`mq.ErrReject` 拒绝且不重新入队（进死信），其他错误把消息拿在手里原地退避重试（1→30 秒），停止时不应答；`message_id` 不是正整数的消息直接拒绝，`timestamp` 缺失或晚于现在一小时以上时用当前时间；断线或订阅被取消后重连。`cmd/worker` 用 `sync.WaitGroup.Go` 同时跑投递员和消费者，`handleEvent` 把 `notification.ErrInvalidEvent` 翻译成 `mq.ErrReject`。实测 RabbitMQ 4.2：消费者没确认就断开、带重新入队的拒绝都计一次投递，最多投递 6 次后以 `delivery_limit` 进死信。测试：FromEvent/Service/Repository（假驱动）单元测试，消费者用假的应答记录和 synctest；真实 MySQL（schema 与 008 一致、事件时间、重复和 8 个并发只留一条、删评论保留、删视频级联、用户不存在算无效）、真实 RabbitMQ（确认、拒绝进死信、原地重试、队列被删后重新声明订阅、prefetch、6 次投递后进死信）、MySQL + RabbitMQ 的 worker 端到端；60 处变异全部抓住。gostream-dev 已经用户同意执行 008 并换新镜像（api 和 worker），此前在队列里等了一天半的 4 条消息变成作者 1 的 4 条通知，通知时间等于当初点赞、评论的时间，通知队列清空、死信 0；Windows 全量（带一次性 MySQL 和 RabbitMQ）、Linux vet/race、隔离 Compose 真实浏览器验收（第二个账号点赞后作者有通知、worker 停止期间的评论在重建后变成通知）通过。下一步：M4 第四步通知列表接口与页面（未读数、标记已读）。
 
+M4 第四步（2026-11-14）：通知列表与已读已完成。接口都要登录、接收者只取自 JWT：`GET /notifications?limit=&cursor=`（id 倒序，游标是上一页最后一条的 id，limit 默认 20 最大 50，Service 多查一条算 `has_more`，一条 SQL 用 JOIN users/videos、LEFT JOIN video_comments 带出 `actor_name`、`video_title`、`comment_content`，空列表返回 `[]`）、`GET /notifications/unread-count`、`PUT /notifications/:id/read`（`UPDATE … AND read_at IS NULL`，改到 0 行再用 `EXISTS` 区分已读过 204 和不存在/不是自己的 404）、`PUT /notifications/read?up_to=`（只标 id 不大于 up_to 的）；两个 PUT 计入写操作额度，两个 GET 带 private no-store。已有库执行 `009_notifications_unread_index.sql`（`(recipient_id, read_at)`；600 行时 EXPLAIN 为 ref + Using index，去掉后改用唯一键并回表）。四个业务文件（`notification.go` 的 Item/Page/错误、`repository.go`、`service.go`、新文件 `handler.go`）由用户编写，测试抓到 5 处问题后经用户同意由我改正：List 参数多一个逗号（编译期接口检查拦下）、`ParseInt` 改 `ParseUint`、`Scan(&items)` 少 `.Error`（vet 抓到）、拼 SQL 少前导空格、返回值多包一层 `data`。前端：侧栏“通知”带未读数（60 秒轮询、按用户 ID 丢弃旧结果）、通知页（未读高亮、刷新、加载更多、点开先标记已读再打开视频、全部已读带 up_to）、手机导航改两行、开发代理加 `/notifications`。测试：Service/Handler/Repository（假驱动支持查询）单元测试、真实 MySQL 列表与 EXPLAIN、HTTP 端到端（粉丝看不到也改不了作者的通知）、路由 401 与限流、前端单元/夹具/真实浏览器；45 处变异全部抓住（其中一处起初漏网，已加强测试）。gostream-dev 已经用户同意执行 009 并换新镜像（api 和 worker）；Windows 全量、Linux vet/race、前端检查、隔离 Compose 真实浏览器验收通过。注意：用 `vite preview` 看页面时请求会转发到 19080，页面加载会调用 `/auth/refresh` 并计入限流，事后要删 `gostream:ratelimit:v1:refresh:ip:*`。下一步：M4 第五步 SSE 实时提醒。
+
 以下为原设计，已按此实现。后续里程碑仍按小步骤指导，不要一次写完 M3～M6。
 
 ### 第一节建议
@@ -321,7 +324,7 @@ M4 第三步（2026-11-14）：通知消费者已完成。新表 `notifications`
 | M1 | 已完成：Vue/容器与本地验收、阶段提交 cdf4a69、GitHub 远端与首次 CI |
 | M2 | 已完成：关注关系与关注流 |
 | M3 | 已完成：视频详情 Cache-Aside、本地缓存/singleflight、空值缓存、最新流时间线、限流、认证刷新与撤销 |
-| M4 | 进行中：同事务 Outbox、投递员（独立 worker 发到 RabbitMQ）、通知消费者（幂等/ACK/原地重试/死信）已完成；余下通知列表接口与页面、鉴权 SSE |
+| M4 | 进行中：同事务 Outbox、投递员（独立 worker 发到 RabbitMQ）、通知消费者（幂等/ACK/原地重试/死信）、通知列表与已读（接口、侧栏未读数、通知页）已完成；余下鉴权 SSE |
 | M5 | Redis 上传会话、分片/进度/合并、spark-md5、续传、过期清理 |
 | M6 | 扩展 CI/集成/故障验证、日志与指标、受控 pprof、真实测量和面试证据 |
 

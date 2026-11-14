@@ -123,8 +123,8 @@ Handler 不决定客户端传入的 author_id 是否可信，当前用户身份�
 - RabbitMQ（发布端第二步、消费端第三步已实现，internal/mq）：topic 交换机 gostream.events，routing key 即事件类型；仲裁队列 gostream.notifications 绑定 like.created、comment.created，x-delivery-limit 为 5，超过或被拒绝的消息经 fanout 交换机 gostream.events.dead 进 gostream.notifications.dead。发布用持久消息，message_id 为事件 ID，开启 publisher confirms 并以 mandatory 发布（没有队列接收会被退回，按未确认处理）；出错后关闭通道，下次重新连接。消息投递按可能重复处理，不宣称恰好一次。
 - 业务事务提交但发布失败：outbox 保留待发；发布成功但标记失败：允许重发，由消费者去重。
 - Worker（第二、三步已实现）：cmd/worker 只读取 GOSTREAM_DSN、GOSTREAM_AMQP_URL；投递员和消费者是同一进程里的两个 goroutine；启动时连不上 MySQL 直接报错退出（Compose 会重启它），运行中 MySQL 或 RabbitMQ 不可用时退避重试、不退出；SIGTERM 或 Ctrl+C 取消 context，未标记的事件随事务回滚、未确认的消息回到队列，两个任务都停下后进程以退出码 0 结束。main 把 notification.ErrInvalidEvent 翻译成 mq.ErrReject，业务包不依赖 RabbitMQ。
-- 拟定接口：GET /notifications、PATCH /notifications/:id/read、GET /notifications/stream。
-- 通知只给接收者读取；SSE 通道不能信任客户端传来的 recipient_id。
+- 接口（第四步已实现，都要登录）：GET /notifications?limit=&cursor=（id 倒序，游标是上一页最后一条的 id，limit 默认 20、最大 50）、GET /notifications/unread-count、PUT /notifications/:id/read（标记已读是幂等的“设成已读”，所以和点赞、关注一样用 PUT，不用最初拟定的 PATCH）、PUT /notifications/read?up_to=（全部已读只到页面上最新那条）。未读数靠 009 的 (recipient_id, read_at) 覆盖索引；前端每 60 秒查一次未读数。实时流 GET /notifications/stream 在第五步。
+- 通知只给接收者读取（第四步已实现）：接收者只取自 JWT，每条 SQL 都带 recipient_id；别人的通知 ID 和不存在的 ID 一样返回 404，不暴露哪些 ID 存在。SSE 通道同样不能信任客户端传来的 recipient_id。
 - SSE 鉴权在浏览器客户端实现阶段选定：可用带 Authorization 的 fetch 读取流；不把长期 JWT 放在 URL 中。
 - SSE 是提示通道，持久化通知是事实；重连时按位置补读，避免把推送成功当成用户已读。
 - 消息处理不直接依赖用户当前是否在线；自己给自己互动在写事件时就已排除（第一步），消费端按事件 ID 去重。

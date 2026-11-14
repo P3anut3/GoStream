@@ -82,6 +82,11 @@ func TestRouterRateLimits(t *testing.T) {
 				if response := do(http.MethodPut, "/videos/1/like", userA); response.Code != http.StatusTooManyRequests {
 					t.Fatalf("likes share the write allowance, got %d", response.Code)
 				}
+				for _, path := range []string{"/notifications/1/read", "/notifications/read?up_to=1"} {
+					if response := do(http.MethodPut, path, userA); response.Code != http.StatusTooManyRequests {
+						t.Fatalf("marking notifications read shares the write allowance, got %d for %s", response.Code, path)
+					}
+				}
 				if response := do(http.MethodPost, "/videos", userB); response.Code != http.StatusBadRequest {
 					t.Fatalf("another user has their own allowance, got %d", response.Code)
 				}

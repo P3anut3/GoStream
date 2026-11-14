@@ -293,7 +293,39 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	if queued("gostream.notifications.dead") != "0" {
 		t.Fatal("no event may end up in the dead-letter queue")
 	}
-	t.Log("worker turned the fan's like into a notification for the author")
+	// fanNotifications reads the author's notifications from the fan through the API, and the
+	// unread count next to them.
+	fanNotifications := func(base string) (map[string]int, int) {
+		t.Helper()
+		var page struct {
+			Notifications []struct {
+				Type      string `json:"type"`
+				ActorName string `json:"actor_name"`
+				VideoID   uint64 `json:"video_id"`
+				Read      bool   `json:"read"`
+			} `json:"notifications"`
+		}
+		if err := json.Unmarshal(request(base, "GET", "/notifications", login.Token, nil, "", 200, false), &page); err != nil {
+			t.Fatal("cannot read the author's notifications")
+		}
+		unread := map[string]int{}
+		for _, n := range page.Notifications {
+			if n.ActorName == "compose_fan" && n.VideoID == published.ID && !n.Read {
+				unread[n.Type]++
+			}
+		}
+		var count struct {
+			Count int `json:"count"`
+		}
+		if err := json.Unmarshal(request(base, "GET", "/notifications/unread-count", login.Token, nil, "", 200, false), &count); err != nil {
+			t.Fatal("cannot read the author's unread count")
+		}
+		return unread, count.Count
+	}
+	if unread, count := fanNotifications(apiBase); unread["like.created"] != 1 || count != 1 {
+		t.Fatalf("the author's notification list must show the fan's like as unread, got %v and count %d", unread, count)
+	}
+	t.Log("worker turned the fan's like into a notification the author reads through the API")
 
 	// While the worker is stopped, a new comment waits in the outbox.
 	run(true, "stop", "--timeout", "8", "worker")
@@ -346,6 +378,9 @@ func TestComposeEnvironmentIntegration(t *testing.T) {
 	waitFor("the waiting comment becomes a notification", func() bool { return notified("comment.created") == "1" })
 	if notified("like.created") != "1" || pendingEvents() != "0" || queued("gostream.notifications.dead") != "0" {
 		t.Fatal("after recreation the like notification must be kept once and nothing may be left over")
+	}
+	if unread, count := fanNotifications(apiBase); unread["like.created"] != 1 || unread["comment.created"] != 1 || count != 2 {
+		t.Fatalf("after recreation the author must read both notifications as unread, got %v and count %d", unread, count)
 	}
 	t.Log("after down/up: account/JWT, video record, uploaded file, Redis value, RabbitMQ message and notification retained; the waiting comment became a notification")
 }

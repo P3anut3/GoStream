@@ -28,10 +28,22 @@ func TestRunReportsAnUnreachableDatabase(t *testing.T) {
 	}
 }
 
-// stubRepository answers every Create with err.
+// stubRepository answers every Create with err; the worker never reads notifications.
 type stubRepository struct{ err error }
 
 func (r stubRepository) Create(context.Context, notification.Notification) error { return r.err }
+func (stubRepository) List(context.Context, uint64, uint64, int) ([]notification.Item, error) {
+	return nil, errors.New("unexpected List")
+}
+func (stubRepository) CountUnread(context.Context, uint64) (int64, error) {
+	return 0, errors.New("unexpected CountUnread")
+}
+func (stubRepository) MarkRead(context.Context, uint64, uint64) error {
+	return errors.New("unexpected MarkRead")
+}
+func (stubRepository) MarkAllRead(context.Context, uint64, uint64) error {
+	return errors.New("unexpected MarkAllRead")
+}
 
 // TestHandleEvent: an invalid event is rejected into the dead-letter queue, a database error is
 // retried, and a stored notification is acknowledged.
